@@ -14,6 +14,8 @@ DEFAULT_FIVEK_SAMPLES = [
     "a4207-kme_1045.dng",
     "a4210-kme_0540.dng",
 ]
+QPD_CFA_PATTERN = "RGGB"
+QPD_CFA_LAYOUT = "quad_bayer_2x2_blocks"
 
 
 def list_fivek_dng_names():
@@ -68,14 +70,28 @@ def download_samples(raw_dir, sample_names):
     return records
 
 
-def output_is_complete(output_dir):
-    return (output_dir / "metadata.json").exists() and (output_dir / "qpd_raw.npy").exists()
+def output_is_complete(output_dir, args):
+    required = ("metadata.json", "qpd_raw.npy", "clean_energy_field.npy")
+    if not all((output_dir / name).exists() for name in required):
+        return False
+    try:
+        with open(output_dir / "metadata.json", "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    expected = {
+        "crop": args.crop,
+        "qpd_readout_mode": args.qpd_readout_mode,
+        "qpd_cfa_pattern": QPD_CFA_PATTERN,
+        "qpd_cfa_layout": QPD_CFA_LAYOUT,
+    }
+    return all(metadata.get(key) == value for key, value in expected.items())
 
 
 def run_single_image(pipeline_path, raw_path, output_root, args, index):
     stem = raw_path.stem
     output_dir = output_root / stem
-    if args.skip_existing and output_is_complete(output_dir):
+    if args.skip_existing and output_is_complete(output_dir, args):
         print(f"skip existing output: {output_dir}")
         with open(output_dir / "metadata.json", "r", encoding="utf-8") as f:
             metadata = json.load(f)
@@ -100,6 +116,7 @@ def run_single_image(pipeline_path, raw_path, output_root, args, index):
         cmd.extend(["--crop", args.crop])
     if args.ccm_source:
         cmd.extend(["--ccm-source", args.ccm_source])
+    cmd.extend(["--qpd-readout-mode", args.qpd_readout_mode])
     if args.skip_qsc:
         cmd.append("--skip-qsc")
     if args.skip_noise:
@@ -147,6 +164,9 @@ def summarize_result(raw_path, output_dir, metadata, skipped=False):
         if metadata.get("noise_row") is None
         else metadata["noise_row"].get("noise_iso_selection"),
         "ccm_source": metadata.get("isp_params", {}).get("ccm_source"),
+        "qpd_readout_mode": metadata.get("qpd_readout_mode"),
+        "qpd_cfa_pattern": metadata.get("qpd_cfa_pattern"),
+        "qpd_cfa_layout": metadata.get("qpd_cfa_layout"),
         "roundtrip_error": metadata.get("reversible_isp_roundtrip_error"),
     }
 
@@ -167,6 +187,7 @@ def main():
     parser.add_argument("--no-skip-existing", action="store_false", dest="skip_existing", help="Reprocess images even if outputs already exist")
     parser.add_argument("--fail-fast", action="store_true", help="Stop the batch on the first failed image")
     parser.add_argument("--ccm-source", choices=("auto", "rawpy-fit", "metadata", "identity"), default="auto")
+    parser.add_argument("--qpd-readout-mode", choices=("same", "subpixel"), default="same")
     parser.add_argument("--skip-qsc", action="store_true")
     parser.add_argument("--skip-noise", action="store_true")
     args = parser.parse_args()
@@ -229,6 +250,9 @@ def main():
         "output_root": str(output_root),
         "crop": args.crop,
         "count": len(results),
+        "success_count": sum(1 for result in results if not result.get("failed")),
+        "failed_count": sum(1 for result in results if result.get("failed")),
+        "skipped_existing_count": sum(1 for result in results if result.get("skipped_existing")),
         "downloads": download_records,
         "results": results,
     }

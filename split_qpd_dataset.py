@@ -11,6 +11,8 @@ REQUIRED_FILES = {
     "target": "clean_energy_field.npy",
     "metadata": "metadata.json",
 }
+QPD_CFA_PATTERN = "RGGB"
+QPD_CFA_LAYOUT = "quad_bayer_2x2_blocks"
 
 
 def is_valid_sample(sample_dir):
@@ -28,6 +30,10 @@ def collect_samples(source_root):
         metadata_path = sample_dir / REQUIRED_FILES["metadata"]
         with open(metadata_path, "r", encoding="utf-8") as f:
             metadata = json.load(f)
+        if metadata.get("qpd_cfa_pattern") != QPD_CFA_PATTERN:
+            continue
+        if metadata.get("qpd_cfa_layout") != QPD_CFA_LAYOUT:
+            continue
         samples.append(
             {
                 "sample_id": sample_dir.name,
@@ -36,9 +42,14 @@ def collect_samples(source_root):
                 "target": sample_dir / REQUIRED_FILES["target"],
                 "metadata": metadata_path,
                 "shape": metadata.get("shape"),
+                "qpd_shape": metadata.get("qpd_raw_shape", metadata.get("shape")),
+                "target_shape": metadata.get("clean_energy_shape"),
                 "iso": metadata.get("isp_params", {}).get("iso"),
                 "noise_iso": None if metadata.get("noise_row") is None else metadata["noise_row"].get("ISO"),
                 "ccm_source": metadata.get("isp_params", {}).get("ccm_source"),
+                "qpd_readout_mode": metadata.get("qpd_readout_mode"),
+                "qpd_cfa_pattern": metadata.get("qpd_cfa_pattern"),
+                "qpd_cfa_layout": metadata.get("qpd_cfa_layout"),
             }
         )
     return samples
@@ -126,9 +137,14 @@ def manifest_rows(split_name, samples, manifest_root, materialized):
                 "target_clean_energy": make_relative(target_path, manifest_root),
                 "metadata": make_relative(metadata_path, manifest_root),
                 "shape": json.dumps(sample["shape"]),
+                "qpd_shape": json.dumps(sample["qpd_shape"]),
+                "target_shape": json.dumps(sample["target_shape"]),
                 "iso": sample["iso"],
                 "noise_iso": sample["noise_iso"],
                 "ccm_source": sample["ccm_source"],
+                "qpd_readout_mode": sample["qpd_readout_mode"],
+                "qpd_cfa_pattern": sample["qpd_cfa_pattern"],
+                "qpd_cfa_layout": sample["qpd_cfa_layout"],
             }
         )
     return rows
@@ -149,9 +165,14 @@ def write_csv(path, rows):
         "target_clean_energy",
         "metadata",
         "shape",
+        "qpd_shape",
+        "target_shape",
         "iso",
         "noise_iso",
         "ccm_source",
+        "qpd_readout_mode",
+        "qpd_cfa_pattern",
+        "qpd_cfa_layout",
     ]
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

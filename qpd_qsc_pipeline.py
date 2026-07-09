@@ -43,6 +43,10 @@ QPD_OUTPUT_LEVELS = {
     "white_level": 1023,
 }
 
+STANDARD_BAYER_PATTERNS = {"RGGB", "BGGR", "GRBG", "GBRG"}
+QPD_CFA_PATTERN = "RGGB"
+QPD_CFA_LAYOUT = "quad_bayer_2x2_blocks"
+
 SRGB_FROM_XYZ = np.asarray(
     [
         [3.2404542, -1.5371385, -0.4985314],
@@ -96,15 +100,28 @@ def wb_gains_from_rawpy(raw):
 
 def ccm_from_rawpy(raw):
     matrix = np.asarray(raw.rgb_xyz_matrix, dtype=np.float32)
-    if matrix.size == 0:
+    if matrix.ndim != 2 or matrix.shape[1] != 3 or matrix.shape[0] < 3:
         return DEFAULT_ISP_PARAMS["ccm_srgb_from_cam"]
 
     matrix = matrix[:3, :3]
     if not np.any(matrix):
         return DEFAULT_ISP_PARAMS["ccm_srgb_from_cam"]
 
+    # rawpy stores camera-RGB -> XYZ as rows, while this pipeline applies row RGB @ ccm.T.
     ccm = SRGB_FROM_XYZ @ matrix.T
     return ccm.astype(np.float32).tolist()
+
+
+def validate_ccm_matrix(ccm, name="ccm_srgb_from_cam"):
+    ccm = np.asarray(ccm, dtype=np.float32)
+    if ccm.shape != (3, 3):
+        raise ValueError(f"{name} must be a 3x3 matrix, got shape {ccm.shape}")
+    if not np.all(np.isfinite(ccm)):
+        raise ValueError(f"{name} contains NaN or Inf values")
+    det = float(np.linalg.det(ccm))
+    if abs(det) < 1e-8:
+        raise ValueError(f"{name} is singular or nearly singular; determinant={det:.3e}")
+    return ccm
 
 
 def rawpy_effective_color_channels(raw):
@@ -260,12 +277,12 @@ def demosaic_raw_to_camera_rgb(raw_linear, cfa_pattern):
 def apply_forward_isp_linear(camera_rgb, isp_params):
     wb_gains = np.asarray(isp_params["wb_gains"], dtype=np.float32).reshape(1, 1, 3)
     balanced = camera_rgb * wb_gains
-    ccm = np.asarray(isp_params["ccm_srgb_from_cam"], dtype=np.float32)
+    ccm = validate_ccm_matrix(isp_params["ccm_srgb_from_cam"])
     return (balanced @ ccm.T).astype(np.float32)
 
 
 def inverse_linear_isp_to_camera_rgb(linear_srgb, isp_params):
-    ccm = np.asarray(isp_params["ccm_srgb_from_cam"], dtype=np.float32)
+    ccm = validate_ccm_matrix(isp_params["ccm_srgb_from_cam"])
     cam_from_srgb = np.linalg.inv(ccm)
     balanced = linear_srgb @ cam_from_srgb.T
     wb_gains = np.asarray(isp_params["wb_gains"], dtype=np.float32).reshape(1, 1, 3)
@@ -278,14 +295,25 @@ def raw_to_clean_energy_field(raw_data, isp_params):
 
 
 def fit_ccm_from_linear_srgb(clean_energy_field, reference_linear_srgb, isp_params, max_samples=300000):
+    clean_shape = clean_energy_field.shape
+    reference_shape = reference_linear_srgb.shape
+    if clean_shape[:2] != reference_shape[:2]:
+        fit_w = min(clean_shape[1], reference_shape[1])
+        fit_h = min(clean_shape[0], reference_shape[0])
+        clean_energy_field = center_crop_even(clean_energy_field, fit_w, fit_h)
+        reference_linear_srgb = center_crop_even(reference_linear_srgb, fit_w, fit_h)
+
     wb_gains = np.asarray(isp_params["wb_gains"], dtype=np.float32).reshape(1, 1, 3)
     balanced = clean_energy_field * wb_gains
     x = balanced.reshape(-1, 3)
     y = reference_linear_srgb.reshape(-1, 3)
 
     mask = (
-        (np.max(x, axis=1) > 1e-4)
+        np.all(np.isfinite(x), axis=1)
+        & np.all(np.isfinite(y), axis=1)
+        & (np.max(x, axis=1) > 1e-4)
         & (np.max(x, axis=1) < 0.95)
+        & (np.max(y, axis=1) > 1e-4)
         & (np.max(y, axis=1) < 0.95)
     )
     idx = np.flatnonzero(mask)
@@ -296,11 +324,14 @@ def fit_ccm_from_linear_srgb(clean_energy_field, reference_linear_srgb, isp_para
         idx = rng.choice(idx, size=max_samples, replace=False)
 
     a, *_ = np.linalg.lstsq(x[idx], y[idx], rcond=None)
-    ccm = a.T.astype(np.float32)
+    ccm = validate_ccm_matrix(a.T.astype(np.float32), name="fitted ccm_srgb_from_cam")
     pred = np.clip(balanced @ ccm.T, 0.0, 1.0)
     mae = np.mean(np.abs(pred - reference_linear_srgb), axis=(0, 1))
     return ccm, {
         "fit_pixels": int(idx.size),
+        "clean_shape": list(clean_shape),
+        "reference_shape": list(reference_shape),
+        "fit_shape": list(clean_energy_field.shape),
         "determinant": float(np.linalg.det(ccm)),
         "reference": "rawpy linear sRGB, use_camera_wb=True, gamma=(1,1), no_auto_bright=True",
         "mae_rgb": [float(v) for v in mae],
@@ -310,7 +341,7 @@ def fit_ccm_from_linear_srgb(clean_energy_field, reference_linear_srgb, isp_para
 
 def inverse_isp_to_camera_rgb(srgb, isp_params):
     linear_srgb = srgb_to_linear(srgb)
-    ccm = np.asarray(isp_params["ccm_srgb_from_cam"], dtype=np.float32)
+    ccm = validate_ccm_matrix(isp_params["ccm_srgb_from_cam"])
     cam_from_srgb = np.linalg.inv(ccm)
     cam_rgb = linear_srgb @ cam_from_srgb.T
 
@@ -320,27 +351,14 @@ def inverse_isp_to_camera_rgb(srgb, isp_params):
 
 
 def validate_cfa_pattern(cfa_pattern):
-    pattern = cfa_pattern.upper()
-    if len(pattern) != 4 or any(ch not in "RGB" for ch in pattern):
-        raise ValueError("cfa_pattern must be a 2x2 pattern string such as RGGB, GRBG, GBRG, or BGGR")
+    pattern = str(cfa_pattern).upper()
+    if pattern not in STANDARD_BAYER_PATTERNS:
+        raise ValueError(f"cfa_pattern must be one of {sorted(STANDARD_BAYER_PATTERNS)}, got {cfa_pattern!r}")
     return pattern
 
 
-def cfa_sample_same_size(camera_rgb, cfa_pattern):
-    pattern = validate_cfa_pattern(cfa_pattern)
-    channel_index = {"R": 0, "G": 1, "B": 2}
-    h, w, _ = camera_rgb.shape
-    raw = np.empty((h, w), dtype=np.float32)
-
-    for y in range(2):
-        for x in range(2):
-            color = pattern[y * 2 + x]
-            raw[y::2, x::2] = camera_rgb[y::2, x::2, channel_index[color]]
-    return raw
-
-
-def qpd_block_cfa_sample_same_size(camera_rgb, cfa_pattern):
-    pattern = validate_cfa_pattern(cfa_pattern)
+def qpd_quad_bayer_sample(camera_rgb):
+    pattern = QPD_CFA_PATTERN
     channel_index = {"R": 0, "G": 1, "B": 2}
     h, w, _ = camera_rgb.shape
     raw = np.empty((h, w), dtype=np.float32)
@@ -358,21 +376,10 @@ def qpd_block_cfa_sample_same_size(camera_rgb, cfa_pattern):
     return raw
 
 
-def cfa_sample_subpixel_2x(camera_rgb, cfa_pattern):
-    pattern = validate_cfa_pattern(cfa_pattern)
-    channel_index = {"R": 0, "G": 1, "B": 2}
-    h, w, _ = camera_rgb.shape
-    qpd_rgb = np.repeat(np.repeat(camera_rgb, 2, axis=0), 2, axis=1)
-    raw = np.empty((h * 2, w * 2), dtype=np.float32)
-
-    for y in range(2):
-        for x in range(2):
-            color = pattern[y * 2 + x]
-            raw[y * 2::4, x * 2::4] = qpd_rgb[y * 2::4, x * 2::4, channel_index[color]]
-            raw[y * 2 + 1::4, x * 2::4] = qpd_rgb[y * 2 + 1::4, x * 2::4, channel_index[color]]
-            raw[y * 2::4, x * 2 + 1::4] = qpd_rgb[y * 2::4, x * 2 + 1::4, channel_index[color]]
-            raw[y * 2 + 1::4, x * 2 + 1::4] = qpd_rgb[y * 2 + 1::4, x * 2 + 1::4, channel_index[color]]
-    return raw
+def qpd_quad_bayer_sample_subpixel_2x(qpd_rgb_2x):
+    if qpd_rgb_2x.shape[0] % 2 or qpd_rgb_2x.shape[1] % 2:
+        raise ValueError("subpixel QPD RGB must have even height and width")
+    return qpd_quad_bayer_sample(qpd_rgb_2x)
 
 
 def center_crop_even(array, width, height):
@@ -397,7 +404,10 @@ def parse_crop(crop):
     parts = crop.lower().replace("*", "x").split("x")
     if len(parts) != 2:
         raise ValueError("--crop must be WIDTHxHEIGHT, for example 3000x2000")
-    return int(parts[0]), int(parts[1])
+    width, height = int(parts[0]), int(parts[1])
+    if width < 2 or height < 2:
+        raise ValueError("--crop dimensions must both be at least 2 pixels")
+    return width, height
 
 
 def apply_qsc_crosstalk(qpd_rgb, qsc_configs):
@@ -446,7 +456,25 @@ def load_noise_row(noise_table_path, iso, rng):
     if not rows:
         raise ValueError(f"No ISO rows found in {noise_table_path}")
 
-    rows = sorted(rows, key=lambda row: float(row["ISO"]))
+    required_columns = {"ISO", "k-10bit", "b-10bit"}
+    missing_columns = required_columns.difference(rows[0].keys())
+    if missing_columns:
+        raise ValueError(f"Noise table {noise_table_path} is missing columns: {sorted(missing_columns)}")
+
+    normalized_rows = []
+    for row_index, row in enumerate(rows, start=2):
+        out = dict(row)
+        try:
+            out["ISO"] = float(row["ISO"])
+            out["k-10bit"] = float(row["k-10bit"])
+            out["b-10bit"] = float(row["b-10bit"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Noise table row {row_index} must have numeric ISO, k-10bit, and b-10bit values"
+            ) from exc
+        normalized_rows.append(out)
+
+    rows = sorted(normalized_rows, key=lambda row: row["ISO"])
     available_iso = [float(row["ISO"]) for row in rows]
 
     def random_row(reason):
@@ -501,6 +529,7 @@ def save_preview(raw_quantized, black_level, white_level, output_path):
 
 
 def save_srgb_image(srgb, output_path):
+    srgb = np.nan_to_num(srgb, nan=0.0, posinf=1.0, neginf=0.0)
     rgb_u8 = np.rint(np.clip(srgb, 0.0, 1.0) * 255.0).astype(np.uint8)
     cv2.imwrite(str(output_path), rgb_u8[..., ::-1])
 
@@ -532,7 +561,7 @@ def main():
     parser.add_argument("--output-dir", default="outputs", help="Output directory")
     parser.add_argument("--isp-json", help="Optional ISP parameter JSON overrides; sRGB mode uses defaults plus this file")
     parser.add_argument("--qsc-json", help="QSC config JSON; missing fields use defaults")
-    parser.add_argument("--noise-table", default="noise_table.xlsx", help="Noise table .xlsx or .csv path")
+    parser.add_argument("--noise-table", default="noise_table.csv", help="Noise table .xlsx or .csv path")
     parser.add_argument("--iso", type=float, help="Override ISO used for noise table lookup")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--crop", default="3000x2000", help="Center crop before ISP/QSC, default 3000x2000")
@@ -546,13 +575,7 @@ def main():
         "--qpd-readout-mode",
         choices=("same", "subpixel"),
         default="same",
-        help="same keeps raw size equal to input; subpixel expands each pixel to a 2x2 readout",
-    )
-    parser.add_argument(
-        "--qpd-cfa-mode",
-        choices=("qpd-block", "bayer-pixel"),
-        default="qpd-block",
-        help="qpd-block makes every 2x2 QPD block share one CFA color; bayer-pixel is ordinary Bayer sampling.",
+        help="same keeps raw size equal to input; subpixel expands each clean pixel to a 2x2 QPD readout",
     )
     parser.add_argument("--skip-qsc", action="store_true")
     parser.add_argument("--skip-noise", action="store_true")
@@ -621,7 +644,14 @@ def main():
             isp_params["ccm_srgb_from_cam"] = np.eye(3, dtype=np.float32).tolist()
             isp_params["ccm_source"] = "no_valid_matrix_identity" if not has_valid_rawpy_matrix else "identity"
         else:
-            isp_params["ccm_source"] = "metadata_3x3_rgb_xyz_matrix"
+            override_has_ccm = override_isp_params is not None and "ccm_srgb_from_cam" in override_isp_params
+            if rawpy_matrix_shape != [3, 3] and not override_has_ccm:
+                raise ValueError(
+                    f"--ccm-source metadata requires a native 3x3 CCM or an --isp-json override; "
+                    f"rawpy reported matrix shape {rawpy_matrix_shape}. Use --ccm-source rawpy-fit or auto."
+                )
+            isp_params["ccm_source"] = "provided_isp_json_ccm" if override_has_ccm else "metadata_3x3_rgb_xyz_matrix"
+        isp_params["ccm_srgb_from_cam"] = validate_ccm_matrix(isp_params["ccm_srgb_from_cam"]).tolist()
         isp_params["ccm_source_requested"] = args.ccm_source
 
         linear_srgb = apply_forward_isp_linear(clean_energy_field, isp_params)
@@ -637,6 +667,7 @@ def main():
         isp_params["source_kind"] = "srgb"
         isp_params["ccm_source"] = "provided_srgb_params"
         isp_params["ccm_source_requested"] = args.ccm_source
+        isp_params["ccm_srgb_from_cam"] = validate_ccm_matrix(isp_params["ccm_srgb_from_cam"]).tolist()
         srgb = load_srgb_image(input_path)
         srgb = center_crop_even(srgb, crop_width, crop_height)
         clean_energy_field = inverse_isp_to_camera_rgb(srgb, isp_params)
@@ -661,19 +692,18 @@ def main():
     iso = None if isp_params.get("iso") is None else float(isp_params["iso"])
 
     qpd_rgb = np.clip(clean_energy_field, 0.0, 1.0)
+    qpd_readout_scale = 1
     if args.qpd_readout_mode == "subpixel":
         qpd_rgb = np.repeat(np.repeat(qpd_rgb, 2, axis=0), 2, axis=1)
+        qpd_readout_scale = 2
 
     if not args.skip_qsc:
         qpd_rgb = apply_qsc_crosstalk(qpd_rgb, qsc_configs)
 
     if args.qpd_readout_mode == "same":
-        if args.qpd_cfa_mode == "qpd-block":
-            raw_linear = qpd_block_cfa_sample_same_size(qpd_rgb, isp_params["cfa_pattern"])
-        else:
-            raw_linear = cfa_sample_same_size(qpd_rgb, isp_params["cfa_pattern"])
+        raw_linear = qpd_quad_bayer_sample(qpd_rgb)
     else:
-        raw_linear = cfa_sample_subpixel_2x(qpd_rgb[0::2, 0::2, :], isp_params["cfa_pattern"])
+        raw_linear = qpd_quad_bayer_sample_subpixel_2x(qpd_rgb)
 
     noise_row = None
     if not args.skip_noise:
@@ -711,6 +741,9 @@ def main():
         "reversible_isp_roundtrip_error": roundtrip_error,
         "ccm_fit_diagnostics": ccm_fit_diagnostics,
         "shape": list(raw_quantized.shape),
+        "qpd_raw_shape": list(raw_quantized.shape),
+        "clean_energy_shape": list(clean_energy_field.shape),
+        "isp_linear_srgb_shape": list(linear_srgb.shape),
         "dtype": str(raw_quantized.dtype),
         "input_raw_levels": {
             "bit_depth": input_bit_depth,
@@ -723,7 +756,9 @@ def main():
             "white_level": output_white_level,
         },
         "qpd_readout_mode": args.qpd_readout_mode,
-        "qpd_cfa_mode": args.qpd_cfa_mode,
+        "qpd_readout_scale": qpd_readout_scale,
+        "qpd_cfa_pattern": QPD_CFA_PATTERN,
+        "qpd_cfa_layout": QPD_CFA_LAYOUT,
         "isp_params": isp_params,
         "qsc_configs": qsc_configs if not args.skip_qsc else None,
         "noise_row": noise_row,

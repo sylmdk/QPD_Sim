@@ -110,7 +110,8 @@ class QpdSimulate(object):
             mix_matrix = np.random.uniform(0.0, self.qsc_configs['mix_energey'], size=(size_mat, size_mat, self.ch_rgb))
             for i in range(size_mat):
                 mix_matrix[i, i, :] = 1.0 - np.sum(mix_matrix[i, :, :], axis=0) + mix_matrix[i, i, :]
-        return mix_matrix, 1.0 - np.mean(mix_matrix[np.eye(3, dtype=np.int32)])
+        diag = mix_matrix[np.arange(size_mat), np.arange(size_mat), :]
+        return mix_matrix, 1.0 - np.mean(diag)
 
     def apply_local_rdm_mix(self, src_img, params_local_rdm_mix):
         size_h, size_w = src_img.shape[:2]
@@ -290,7 +291,11 @@ class QpdSimulate(object):
                 motion = sk_rotate(motion, rot)[::-1, ::-1]
                 # cv2.imwrite(dst_path + '%d_%d_0_motion.png' % (c, i), motion / np.max(motion) * 255)
 
-                kernel = gauss_kernel(ksize * 2 + 1, sigma + np.random.uniform(0.5), sigma + np.random.uniform(0.5))
+                kernel = gauss_kernel(
+                    ksize * 2 + 1,
+                    sigma + np.random.uniform(0.0, 0.5),
+                    sigma + np.random.uniform(0.0, 0.5),
+                )
                 kernel = cv2.filter2D(kernel.astype(np.float32), -1, motion.astype(np.float32),
                                       borderType=cv2.BORDER_CONSTANT)
                 kernel = np.pad(kernel, ((pad, 0), (pad, 0)))

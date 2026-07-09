@@ -43,10 +43,21 @@ Default settings:
 
 ```text
 crop: 3000x2000
-QPD CFA mode: qpd-block
+QPD CFA layout: fixed quad Bayer RGGB, 2x2 same-color blocks
 QPD raw output: 10bit, black=64, white=1023
 noise model: k-10bit / b-10bit from noise_table.csv
 ```
+
+Optional QPD readout modes:
+
+```powershell
+python qpd_qsc_pipeline.py --input path\to\image.dng --input-kind raw --qpd-readout-mode same
+python qpd_qsc_pipeline.py --input path\to\image.dng --input-kind raw --qpd-readout-mode subpixel
+```
+
+`same` keeps the QPD raw size equal to the clean target. `subpixel` expands each clean pixel into a 2x2 QPD readout grid; QSC perturbation is applied on that expanded grid before CFA sampling.
+
+The simulated QPD raw always uses quad Bayer RGGB layout. The input camera CFA is only used when reading and demosaicing the source RAW into `clean_energy_field`.
 
 Per-sample outputs:
 
@@ -86,12 +97,15 @@ Resume processing an existing DNG directory:
 python batch_fivek_pipeline.py --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --noise-table noise_table.csv
 ```
 
-By default, existing completed samples are skipped. A completed sample has both:
+By default, existing completed samples are skipped. A completed sample has:
 
 ```text
 metadata.json
 qpd_raw.npy
+clean_energy_field.npy
 ```
+
+Its metadata must also match the requested crop/readout settings and the fixed quad Bayer RGGB layout; older outputs with a different QPD CFA contract are reprocessed.
 
 Force reprocessing:
 
@@ -100,6 +114,12 @@ python batch_fivek_pipeline.py --raw-dir data\raw_samples\fivek_full --output-ro
 ```
 
 Some FiveK files are not standard 2x2 Bayer CFA. These are recorded as failures and skipped, unless `--fail-fast` is set.
+
+Batch processing also accepts the single-image QPD mode options:
+
+```powershell
+python batch_fivek_pipeline.py --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --qpd-readout-mode subpixel
+```
 
 ## Dataset Split
 
@@ -124,6 +144,8 @@ Each row maps:
 ```text
 input_qpd_raw -> target_clean_energy
 ```
+
+The manifests include both `qpd_shape` and `target_shape`, so size-changing modes such as `--qpd-readout-mode subpixel` are explicit.
 
 By default, only manifests are written. To materialize files into split folders:
 
@@ -152,6 +174,8 @@ auto:
   4x3 matrix -> fit a reversible 3x3 CCM against rawpy linear sRGB
   no valid color matrix -> identity CCM
 ```
+
+Forcing `--ccm-source metadata` now requires either a native 3x3 CCM or a 3x3 `ccm_srgb_from_cam` supplied through `--isp-json`. Rawpy's common 4x3 matrices should use `auto` or `rawpy-fit` for this reversible 3x3 pipeline.
 
 The roundtrip error is written into `metadata.json`.
 
