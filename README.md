@@ -169,12 +169,16 @@ isp_linear_srgb -> inverse CCM -> inverse AWB -> clean_energy_field
 CCM selection:
 
 ```text
-auto:
-  rawpy color matrix exists -> fit a reversible 3x3 CCM against rawpy linear sRGB
-  no rawpy color matrix -> identity CCM
+metadata (default):
+  use raw.color_matrix[:, :3] as camera-to-sRGB CCM
+  if unavailable, derive the CCM from raw.rgb_xyz_matrix through a normalized pseudo-inverse
+rawpy-fit:
+  fit a reversible 3x3 CCM against rawpy linear sRGB
+identity:
+  bypass CCM and keep only AWB
 ```
 
-The default `auto` path uses `rawpy-fit` whenever `rawpy.rgb_xyz_matrix` exists. It does not inspect the matrix shape or effective channel count. RAW metadata initializes `ccm_srgb_from_cam` from the default ISP params; the fitted CCM overwrites it before preview/output generation. `--ccm-source metadata` is only for explicit debugging with a 3x3 `ccm_srgb_from_cam` supplied through `--isp-json`.
+The default `metadata` path uses LibRaw/rawpy's camera-to-sRGB `color_matrix` when available. If `color_matrix` is unavailable, it derives the same style of CCM from `rgb_xyz_matrix` with `pinv(row_normalize(raw.rgb_xyz_matrix[:3, :3] @ srgb_to_xyz_d65))`. Use `--ccm-source rawpy-fit` when you want the preview to match rawpy's full postprocess output more closely despite demosaic/scale differences.
 
 The roundtrip error is written into `metadata.json`.
 

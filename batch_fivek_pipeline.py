@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 
@@ -41,7 +42,8 @@ def download_file(url, dst_path, retries=3, sleep_seconds=3.0):
     last_error = None
     for attempt in range(1, retries + 1):
         try:
-            with urllib.request.urlopen(url, timeout=120) as response:
+            safe_url = urllib.parse.quote(url, safe=':/')
+            with urllib.request.urlopen(safe_url, timeout=120) as response:
                 with open(tmp_path, "wb") as f:
                     while True:
                         chunk = response.read(1024 * 1024)
@@ -85,7 +87,9 @@ def output_is_complete(output_dir, args):
         "qpd_cfa_pattern": QPD_CFA_PATTERN,
         "qpd_cfa_layout": QPD_CFA_LAYOUT,
     }
-    return all(metadata.get(key) == value for key, value in expected.items())
+    if not all(metadata.get(key) == value for key, value in expected.items()):
+        return False
+    return metadata.get("isp_params", {}).get("ccm_source_requested") == args.ccm_source
 
 
 def run_single_image(pipeline_path, raw_path, output_root, args, index):
@@ -186,7 +190,12 @@ def main():
     parser.add_argument("--skip-existing", action="store_true", default=True, help="Skip images whose output metadata and qpd_raw already exist")
     parser.add_argument("--no-skip-existing", action="store_false", dest="skip_existing", help="Reprocess images even if outputs already exist")
     parser.add_argument("--fail-fast", action="store_true", help="Stop the batch on the first failed image")
-    parser.add_argument("--ccm-source", choices=("auto", "rawpy-fit", "metadata", "identity"), default="auto")
+    parser.add_argument(
+        "--ccm-source",
+        choices=("auto", "rawpy-fit", "metadata", "identity"),
+        default="metadata",
+        help="CCM source passed to qpd_qsc_pipeline.py; default matches the single-image pipeline.",
+    )
     parser.add_argument("--qpd-readout-mode", choices=("same", "subpixel"), default="same")
     parser.add_argument("--skip-qsc", action="store_true")
     parser.add_argument("--skip-noise", action="store_true")
