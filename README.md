@@ -170,12 +170,11 @@ CCM selection:
 
 ```text
 auto:
-  native 3x3 color matrix -> use metadata CCM
-  4x3 matrix -> fit a reversible 3x3 CCM against rawpy linear sRGB
-  no valid color matrix -> identity CCM
+  rawpy color matrix exists -> fit a reversible 3x3 CCM against rawpy linear sRGB
+  no rawpy color matrix -> identity CCM
 ```
 
-Forcing `--ccm-source metadata` now requires either a native 3x3 CCM or a 3x3 `ccm_srgb_from_cam` supplied through `--isp-json`. Rawpy's common 4x3 matrices should use `auto` or `rawpy-fit` for this reversible 3x3 pipeline.
+The default `auto` path uses `rawpy-fit` whenever `rawpy.rgb_xyz_matrix` exists. It does not inspect the matrix shape or effective channel count. RAW metadata initializes `ccm_srgb_from_cam` from the default ISP params; the fitted CCM overwrites it before preview/output generation. `--ccm-source metadata` is only for explicit debugging with a 3x3 `ccm_srgb_from_cam` supplied through `--isp-json`.
 
 The roundtrip error is written into `metadata.json`.
 

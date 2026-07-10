@@ -47,16 +47,6 @@ STANDARD_BAYER_PATTERNS = {"RGGB", "BGGR", "GRBG", "GBRG"}
 QPD_CFA_PATTERN = "RGGB"
 QPD_CFA_LAYOUT = "quad_bayer_2x2_blocks"
 
-SRGB_FROM_XYZ = np.asarray(
-    [
-        [3.2404542, -1.5371385, -0.4985314],
-        [-0.9692660, 1.8760108, 0.0415560],
-        [0.0556434, -0.2040259, 1.0572252],
-    ],
-    dtype=np.float32,
-)
-
-
 def srgb_to_linear(srgb):
     srgb = np.clip(srgb, 0.0, 1.0)
     return np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
@@ -98,20 +88,6 @@ def wb_gains_from_rawpy(raw):
     return [float(wb[0] / g), 1.0, float(wb[2] / g)]
 
 
-def ccm_from_rawpy(raw):
-    matrix = np.asarray(raw.rgb_xyz_matrix, dtype=np.float32)
-    if matrix.ndim != 2 or matrix.shape[1] != 3 or matrix.shape[0] < 3:
-        return DEFAULT_ISP_PARAMS["ccm_srgb_from_cam"]
-
-    matrix = matrix[:3, :3]
-    if not np.any(matrix):
-        return DEFAULT_ISP_PARAMS["ccm_srgb_from_cam"]
-
-    # rawpy stores camera-RGB -> XYZ as rows, while this pipeline applies row RGB @ ccm.T.
-    ccm = SRGB_FROM_XYZ @ matrix.T
-    return ccm.astype(np.float32).tolist()
-
-
 def validate_ccm_matrix(ccm, name="ccm_srgb_from_cam"):
     ccm = np.asarray(ccm, dtype=np.float32)
     if ccm.shape != (3, 3):
@@ -122,14 +98,6 @@ def validate_ccm_matrix(ccm, name="ccm_srgb_from_cam"):
     if abs(det) < 1e-8:
         raise ValueError(f"{name} is singular or nearly singular; determinant={det:.3e}")
     return ccm
-
-
-def rawpy_effective_color_channels(raw):
-    matrix = np.asarray(raw.rgb_xyz_matrix, dtype=np.float32)
-    if matrix.ndim != 2 or matrix.shape[1] != 3:
-        return int(getattr(raw, "num_colors", 3))
-    active_rows = np.any(np.abs(matrix) > 1e-8, axis=1)
-    return int(np.count_nonzero(active_rows))
 
 
 def read_exif_iso(path):
@@ -181,7 +149,7 @@ def load_raw_with_isp_params(path, override_params=None):
         white_level = float(raw.white_level) if raw.white_level is not None else float(np.max(raw_data))
         bit_depth = int(np.ceil(np.log2(max(white_level + 1.0, 2.0))))
         rawpy_matrix = np.asarray(raw.rgb_xyz_matrix, dtype=np.float32)
-        effective_color_channels = rawpy_effective_color_channels(raw)
+        has_rawpy_color_matrix = bool(rawpy_matrix.size > 0)
 
         isp_params = dict(DEFAULT_ISP_PARAMS)
         isp_params.update(
@@ -196,13 +164,8 @@ def load_raw_with_isp_params(path, override_params=None):
                 "iso": None,
                 "iso_source": "unavailable",
                 "wb_gains": wb_gains_from_rawpy(raw),
-                "rawpy_rgb_xyz_matrix": rawpy_matrix.astype(np.float32).tolist() if rawpy_matrix.size > 0 else None,
-                "rawpy_rgb_xyz_matrix_shape": list(rawpy_matrix.shape) if rawpy_matrix.size > 0 else None,
-                "camera_to_xyz_matrix_3x3": rawpy_matrix[:3, :3].astype(np.float32).tolist()
-                if rawpy_matrix.size > 0
-                else None,
-                "effective_color_channels": effective_color_channels,
-                "ccm_srgb_from_cam": ccm_from_rawpy(raw),
+                "has_rawpy_color_matrix": has_rawpy_color_matrix,
+                "ccm_srgb_from_cam": DEFAULT_ISP_PARAMS["ccm_srgb_from_cam"],
             }
         )
 
@@ -569,7 +532,7 @@ def main():
         "--ccm-source",
         choices=("auto", "rawpy-fit", "metadata", "identity"),
         default="auto",
-        help="auto uses metadata only when RAW stores a native 3x3 matrix; 4x3 matrices are fit to reversible 3x3.",
+        help="auto fits a reversible 3x3 CCM against rawpy linear sRGB when RAW has a valid color matrix.",
     )
     parser.add_argument(
         "--qpd-readout-mode",
@@ -617,40 +580,33 @@ def main():
         raw_data = center_crop_even(raw_data, crop_width, crop_height)
         clean_energy_field = raw_to_clean_energy_field(raw_data, isp_params)
         requested_ccm_source = args.ccm_source
-        rawpy_matrix_shape = isp_params.get("rawpy_rgb_xyz_matrix_shape")
-        has_valid_rawpy_matrix = int(isp_params.get("effective_color_channels", 0)) >= 3
+        has_rawpy_color_matrix = bool(isp_params.get("has_rawpy_color_matrix"))
         if requested_ccm_source == "auto":
-            if not has_valid_rawpy_matrix:
-                requested_ccm_source = "identity"
-            else:
-                requested_ccm_source = "metadata" if rawpy_matrix_shape == [3, 3] else "rawpy-fit"
+            requested_ccm_source = "rawpy-fit" if has_rawpy_color_matrix else "identity"
 
         if requested_ccm_source == "rawpy-fit":
-            if not has_valid_rawpy_matrix:
+            if not has_rawpy_color_matrix:
                 raise ValueError(
-                    "Cannot fit CCM because RAW metadata has no valid color matrix. "
+                    "Cannot fit CCM because RAW metadata has no rawpy color matrix. "
                     "Use --ccm-source identity, or provide valid ISP parameters with --isp-json."
                 )
             reference_linear_srgb = load_rawpy_linear_srgb(input_path, crop_width, crop_height)
-            metadata_ccm = isp_params["ccm_srgb_from_cam"]
             fitted_ccm, ccm_fit_diagnostics = fit_ccm_from_linear_srgb(
                 clean_energy_field, reference_linear_srgb, isp_params
             )
-            isp_params["reference_ccm_srgb_from_cam_from_raw_metadata"] = metadata_ccm
             isp_params["ccm_srgb_from_cam"] = fitted_ccm.tolist()
             isp_params["ccm_source"] = "rawpy-fit"
         elif requested_ccm_source == "identity":
-            isp_params["reference_ccm_srgb_from_cam_from_raw_metadata"] = isp_params["ccm_srgb_from_cam"]
             isp_params["ccm_srgb_from_cam"] = np.eye(3, dtype=np.float32).tolist()
-            isp_params["ccm_source"] = "no_valid_matrix_identity" if not has_valid_rawpy_matrix else "identity"
+            isp_params["ccm_source"] = "no_rawpy_color_matrix_identity" if not has_rawpy_color_matrix else "identity"
         else:
             override_has_ccm = override_isp_params is not None and "ccm_srgb_from_cam" in override_isp_params
-            if rawpy_matrix_shape != [3, 3] and not override_has_ccm:
+            if not override_has_ccm:
                 raise ValueError(
-                    f"--ccm-source metadata requires a native 3x3 CCM or an --isp-json override; "
-                    f"rawpy reported matrix shape {rawpy_matrix_shape}. Use --ccm-source rawpy-fit or auto."
+                    "--ccm-source metadata now requires a 3x3 --isp-json ccm_srgb_from_cam override. "
+                    "Use --ccm-source rawpy-fit or auto for RAW-derived CCM."
                 )
-            isp_params["ccm_source"] = "provided_isp_json_ccm" if override_has_ccm else "metadata_3x3_rgb_xyz_matrix"
+            isp_params["ccm_source"] = "provided_isp_json_ccm"
         isp_params["ccm_srgb_from_cam"] = validate_ccm_matrix(isp_params["ccm_srgb_from_cam"]).tolist()
         isp_params["ccm_source_requested"] = args.ccm_source
 
