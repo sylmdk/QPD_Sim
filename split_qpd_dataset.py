@@ -13,6 +13,8 @@ REQUIRED_FILES = {
 }
 QPD_CFA_PATTERN = "RGGB"
 QPD_CFA_LAYOUT = "quad_bayer_2x2_blocks"
+QPD_SIMULATOR_TYPE = "hwk_full_field"
+QPD_SIMULATOR_VERSION = 1
 
 
 def is_valid_sample(sample_dir):
@@ -34,6 +36,10 @@ def collect_samples(source_root):
             continue
         if metadata.get("qpd_cfa_layout") != QPD_CFA_LAYOUT:
             continue
+        if metadata.get("qpd_simulator_type") != QPD_SIMULATOR_TYPE:
+            continue
+        if metadata.get("qpd_simulator_version") != QPD_SIMULATOR_VERSION:
+            continue
         samples.append(
             {
                 "sample_id": sample_dir.name,
@@ -50,6 +56,9 @@ def collect_samples(source_root):
                 "qpd_readout_mode": metadata.get("qpd_readout_mode"),
                 "qpd_cfa_pattern": metadata.get("qpd_cfa_pattern"),
                 "qpd_cfa_layout": metadata.get("qpd_cfa_layout"),
+                "qpd_simulator_type": metadata.get("qpd_simulator_type"),
+                "hwk_distance": metadata.get("qpd_simulation", {}).get("distance"),
+                "hwk_aperture": metadata.get("qpd_simulation", {}).get("aperture"),
             }
         )
     return samples
@@ -145,6 +154,9 @@ def manifest_rows(split_name, samples, manifest_root, materialized):
                 "qpd_readout_mode": sample["qpd_readout_mode"],
                 "qpd_cfa_pattern": sample["qpd_cfa_pattern"],
                 "qpd_cfa_layout": sample["qpd_cfa_layout"],
+                "qpd_simulator_type": sample["qpd_simulator_type"],
+                "hwk_distance": sample["hwk_distance"],
+                "hwk_aperture": sample["hwk_aperture"],
             }
         )
     return rows
@@ -173,6 +185,9 @@ def write_csv(path, rows):
         "qpd_readout_mode",
         "qpd_cfa_pattern",
         "qpd_cfa_layout",
+        "qpd_simulator_type",
+        "hwk_distance",
+        "hwk_aperture",
     ]
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

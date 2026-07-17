@@ -1,27 +1,18 @@
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from crosstalk_sim import QpdSimulate
-
-
-DEFAULT_QSC_CONFIGS = {
-    "prob_shading": 0.0,
-    "prob_blur": 0.6,
-    "pad": 1,
-    "ksize": 21,
-    "sigma": (0.2, 1.8),
-    "prob_reorder": 0.9,
-    "reorder_range": 0.35,
-    "reorder_color": 0.10,
-    "prob_rdm_mix": 0.5,
-    "mix_energey": 0.25,
-    "prob_flatten": 0.8,
-}
+from qpd_hwk_simulator import (
+    HwkBank,
+    QpdHwkSimulator,
+    quad_rggb_planes_to_mosaic,
+    quad_rggb_sample_to_planes,
+)
 
 DEFAULT_ISP_PARAMS = {
     "cfa_pattern": "RGGB",
@@ -46,6 +37,8 @@ QPD_OUTPUT_LEVELS = {
 STANDARD_BAYER_PATTERNS = {"RGGB", "BGGR", "GRBG", "GBRG"}
 QPD_CFA_PATTERN = "RGGB"
 QPD_CFA_LAYOUT = "quad_bayer_2x2_blocks"
+QPD_SIMULATOR_TYPE = "hwk_full_field"
+QPD_SIMULATOR_VERSION = 1
 
 SRGB_FROM_XYZ = np.asarray(
     [
@@ -255,7 +248,7 @@ def load_rawpy_linear_srgb(path, crop_width=None, crop_height=None):
             user_flip=0,
         )
     linear_srgb = srgb_u16.astype(np.float32) / 65535.0
-    return center_crop_even(linear_srgb, crop_width, crop_height)
+    return center_crop_quad(linear_srgb, crop_width, crop_height)
 
 
 def normalize_raw_mosaic(raw_data, isp_params):
@@ -317,8 +310,8 @@ def fit_ccm_from_linear_srgb(clean_energy_field, reference_linear_srgb, isp_para
     if clean_shape[:2] != reference_shape[:2]:
         fit_w = min(clean_shape[1], reference_shape[1])
         fit_h = min(clean_shape[0], reference_shape[0])
-        clean_energy_field = center_crop_even(clean_energy_field, fit_w, fit_h)
-        reference_linear_srgb = center_crop_even(reference_linear_srgb, fit_w, fit_h)
+        clean_energy_field = center_crop_quad(clean_energy_field, fit_w, fit_h)
+        reference_linear_srgb = center_crop_quad(reference_linear_srgb, fit_w, fit_h)
 
     wb_gains = np.asarray(isp_params["wb_gains"], dtype=np.float32).reshape(1, 1, 3)
     balanced = clean_energy_field * wb_gains
@@ -374,32 +367,7 @@ def validate_cfa_pattern(cfa_pattern):
     return pattern
 
 
-def qpd_quad_bayer_sample(camera_rgb):
-    pattern = QPD_CFA_PATTERN
-    channel_index = {"R": 0, "G": 1, "B": 2}
-    h, w, _ = camera_rgb.shape
-    raw = np.empty((h, w), dtype=np.float32)
-
-    for block_y in range(2):
-        for block_x in range(2):
-            color = pattern[block_y * 2 + block_x]
-            ch = channel_index[color]
-            y0 = block_y * 2
-            x0 = block_x * 2
-            raw[y0::4, x0::4] = camera_rgb[y0::4, x0::4, ch]
-            raw[y0 + 1::4, x0::4] = camera_rgb[y0 + 1::4, x0::4, ch]
-            raw[y0::4, x0 + 1::4] = camera_rgb[y0::4, x0 + 1::4, ch]
-            raw[y0 + 1::4, x0 + 1::4] = camera_rgb[y0 + 1::4, x0 + 1::4, ch]
-    return raw
-
-
-def qpd_quad_bayer_sample_subpixel_2x(qpd_rgb_2x):
-    if qpd_rgb_2x.shape[0] % 2 or qpd_rgb_2x.shape[1] % 2:
-        raise ValueError("subpixel QPD RGB must have even height and width")
-    return qpd_quad_bayer_sample(qpd_rgb_2x)
-
-
-def center_crop_even(array, width, height):
+def center_crop_quad(array, width, height):
     if width is None and height is None:
         return array
     if width is None or height is None:
@@ -408,10 +376,12 @@ def center_crop_even(array, width, height):
     h, w = array.shape[:2]
     crop_w = min(width, w)
     crop_h = min(height, h)
-    crop_w -= crop_w % 2
-    crop_h -= crop_h % 2
-    x0 = ((w - crop_w) // 2) // 2 * 2
-    y0 = ((h - crop_h) // 2) // 2 * 2
+    crop_w -= crop_w % 4
+    crop_h -= crop_h % 4
+    if crop_w < 4 or crop_h < 4:
+        raise ValueError("Quad RGGB crop dimensions must both be at least 4 pixels")
+    x0 = ((w - crop_w) // 2) // 4 * 4
+    y0 = ((h - crop_h) // 2) // 4 * 4
     return array[y0:y0 + crop_h, x0:x0 + crop_w, ...]
 
 
@@ -422,19 +392,9 @@ def parse_crop(crop):
     if len(parts) != 2:
         raise ValueError("--crop must be WIDTHxHEIGHT, for example 3000x2000")
     width, height = int(parts[0]), int(parts[1])
-    if width < 2 or height < 2:
-        raise ValueError("--crop dimensions must both be at least 2 pixels")
+    if width < 4 or height < 4:
+        raise ValueError("--crop dimensions must both be at least 4 pixels")
     return width, height
-
-
-def apply_qsc_crosstalk(qpd_rgb, qsc_configs):
-    h, w, _ = qpd_rgb.shape
-    h2 = h - (h % 2)
-    w2 = w - (w % 2)
-    qpd_rgb = qpd_rgb[:h2, :w2, :]
-    sim = QpdSimulate(qsc_configs)
-    mask = np.zeros((h2, w2), dtype=np.float32)
-    return np.clip(sim(qpd_rgb, mask_fore=mask), 0.0, 1.0)
 
 
 def load_noise_row(noise_table_path, iso, rng):
@@ -566,8 +526,18 @@ def load_json_or_default(path, default):
     return merged
 
 
+def sha256_file(path):
+    if path is None:
+        return None
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main():
-    parser = argparse.ArgumentParser(description="RAW/sRGB ISP round-trip to QPD/QSC 2x2 raw simulator")
+    parser = argparse.ArgumentParser(description="RAW/sRGB ISP round-trip to full-field HWK QPD raw simulator")
     parser.add_argument("--input", required=True, help="Input RAW/DNG or sRGB image path")
     parser.add_argument(
         "--input-kind",
@@ -577,29 +547,33 @@ def main():
     )
     parser.add_argument("--output-dir", default="outputs", help="Output directory")
     parser.add_argument("--isp-json", help="Optional ISP parameter JSON overrides; sRGB mode uses defaults plus this file")
-    parser.add_argument("--qsc-json", help="QSC config JSON; missing fields use defaults")
+    parser.add_argument("--hwk-dir", help="HWK field_data directory or statistics root")
+    parser.add_argument("--hwk-config", help="Optional HWK/RDM simulator config JSON")
+    parser.add_argument("--hwk-distance", help="Select one calibrated object distance")
+    parser.add_argument("--hwk-aperture", help="Select one calibrated aperture")
+    parser.add_argument("--no-hwk-cache", action="store_true", help="Disable adjacent .csv.npz HWK caches")
     parser.add_argument("--noise-table", default="noise_table.csv", help="Noise table .xlsx or .csv path")
     parser.add_argument("--iso", type=float, help="Override ISO used for noise table lookup")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--crop", default="3000x2000", help="Center crop before ISP/QSC, default 3000x2000")
+    parser.add_argument("--crop", default="3000x2000", help="4-pixel-aligned center crop before ISP/QPD simulation, default 3000x2000")
     parser.add_argument(
         "--ccm-source",
         choices=("auto", "rawpy-fit", "metadata", "identity"),
         default="metadata",
         help="metadata uses raw.color_matrix or derives it from raw.rgb_xyz_matrix; rawpy-fit fits to rawpy linear sRGB.",
     )
-    parser.add_argument(
-        "--qpd-readout-mode",
-        choices=("same", "subpixel"),
-        default="same",
-        help="same keeps raw size equal to input; subpixel expands each clean pixel to a 2x2 QPD readout",
-    )
-    parser.add_argument("--skip-qsc", action="store_true")
+    parser.add_argument("--skip-qpd-sim", action="store_true", help="Skip HWK/RDM while retaining Quad RGGB sampling")
     parser.add_argument("--skip-noise", action="store_true")
     args = parser.parse_args()
 
-    rng = np.random.default_rng(args.seed)
-    np.random.seed(args.seed)
+    if not args.skip_qpd_sim and args.hwk_dir is None:
+        parser.error("--hwk-dir is required unless --skip-qpd-sim is used")
+
+    seed_sequence = np.random.SeedSequence(args.seed)
+    simulator_sequence, noise_sequence = seed_sequence.spawn(2)
+    simulator_seed = int(simulator_sequence.generate_state(1, dtype=np.uint32)[0])
+    noise_seed = int(noise_sequence.generate_state(1, dtype=np.uint32)[0])
+    noise_rng = np.random.default_rng(noise_sequence)
 
     input_path = Path(args.input)
     raw_suffixes = {
@@ -631,7 +605,7 @@ def main():
     ccm_fit_diagnostics = None
     if input_kind == "raw":
         raw_data, isp_params = load_raw_with_isp_params(input_path, override_isp_params)
-        raw_data = center_crop_even(raw_data, crop_width, crop_height)
+        raw_data = center_crop_quad(raw_data, crop_width, crop_height)
         clean_energy_field = raw_to_clean_energy_field(raw_data, isp_params)
         requested_ccm_source = args.ccm_source
         has_metadata_ccm = bool(isp_params.get("has_metadata_ccm"))
@@ -677,7 +651,7 @@ def main():
         isp_params["ccm_source_requested"] = args.ccm_source
         isp_params["ccm_srgb_from_cam"] = validate_ccm_matrix(isp_params["ccm_srgb_from_cam"]).tolist()
         srgb = load_srgb_image(input_path)
-        srgb = center_crop_even(srgb, crop_width, crop_height)
+        srgb = center_crop_quad(srgb, crop_width, crop_height)
         clean_energy_field = inverse_isp_to_camera_rgb(srgb, isp_params)
         linear_srgb = apply_forward_isp_linear(clean_energy_field, isp_params)
         roundtrip_error = {
@@ -686,7 +660,7 @@ def main():
             "note": "sRGB input is not guaranteed reversible because it may already be gamma encoded, clipped, and quantized.",
         }
 
-    qsc_configs = load_json_or_default(args.qsc_json, DEFAULT_QSC_CONFIGS)
+    hwk_config = load_json_or_default(args.hwk_config, {})
     if args.iso is not None:
         isp_params["iso"] = float(args.iso)
         isp_params["iso_source"] = "command_line_override"
@@ -699,30 +673,44 @@ def main():
     output_white_level = float(QPD_OUTPUT_LEVELS["white_level"])
     iso = None if isp_params.get("iso") is None else float(isp_params["iso"])
 
-    qpd_rgb = np.clip(clean_energy_field, 0.0, 1.0)
-    qpd_readout_scale = 1
-    if args.qpd_readout_mode == "subpixel":
-        qpd_rgb = np.repeat(np.repeat(qpd_rgb, 2, axis=0), 2, axis=1)
-        qpd_readout_scale = 2
-
-    if not args.skip_qsc:
-        qpd_rgb = apply_qsc_crosstalk(qpd_rgb, qsc_configs)
-
-    if args.qpd_readout_mode == "same":
-        raw_linear = qpd_quad_bayer_sample(qpd_rgb)
+    qpd_camera_rgb = np.clip(clean_energy_field, 0.0, 1.0)
+    cfa_planes = quad_rggb_sample_to_planes(qpd_camera_rgb)
+    if args.skip_qpd_sim:
+        simulated_planes = cfa_planes
+        qpd_simulation_meta = {
+            "applied": False,
+            "input_domain": "linear_camera_cfa_planes",
+            "cfa_order": ["R", "Gr", "Gb", "B"],
+        }
+        simulator_config = None
     else:
-        raw_linear = qpd_quad_bayer_sample_subpixel_2x(qpd_rgb)
+        hwk_bank = HwkBank(args.hwk_dir, use_cache=not args.no_hwk_cache)
+        simulator = QpdHwkSimulator(
+            hwk_bank,
+            config=hwk_config,
+            seed=simulator_seed,
+        )
+        simulated_planes, qpd_simulation_meta = simulator(
+            cfa_planes,
+            distance=args.hwk_distance,
+            aperture=args.hwk_aperture,
+            return_meta=True,
+        )
+        qpd_simulation_meta["applied"] = True
+        simulator_config = simulator.config
+
+    raw_linear = quad_rggb_planes_to_mosaic(simulated_planes)
 
     noise_row = None
     if not args.skip_noise:
-        noise_row = load_noise_row(args.noise_table, iso, rng)
+        noise_row = load_noise_row(args.noise_table, iso, noise_rng)
         raw_linear = add_poisson_gaussian_noise(
             raw_linear,
             noise_row,
             output_black_level,
             output_white_level,
             output_bit_depth,
-            rng,
+            noise_rng,
         )
 
     raw_quantized = quantize_raw(raw_linear, output_black_level, output_white_level, output_bit_depth)
@@ -763,12 +751,25 @@ def main():
             "black_level": output_black_level,
             "white_level": output_white_level,
         },
-        "qpd_readout_mode": args.qpd_readout_mode,
-        "qpd_readout_scale": qpd_readout_scale,
+        "qpd_readout_mode": "same",
+        "qpd_readout_scale": 1,
         "qpd_cfa_pattern": QPD_CFA_PATTERN,
         "qpd_cfa_layout": QPD_CFA_LAYOUT,
+        "qpd_simulator_type": "disabled" if args.skip_qpd_sim else QPD_SIMULATOR_TYPE,
+        "qpd_simulator_version": QPD_SIMULATOR_VERSION,
+        "qpd_simulation_request": {
+            "hwk_dir": None if args.hwk_dir is None else str(Path(args.hwk_dir).resolve()),
+            "hwk_config": None if args.hwk_config is None else str(Path(args.hwk_config).resolve()),
+            "hwk_config_sha256": sha256_file(args.hwk_config),
+            "distance": args.hwk_distance,
+            "aperture": args.hwk_aperture,
+            "cache_enabled": not args.no_hwk_cache,
+        },
+        "qpd_simulator_config": simulator_config,
+        "qpd_simulation": qpd_simulation_meta,
+        "simulation_seed": simulator_seed,
+        "noise_seed": noise_seed,
         "isp_params": isp_params,
-        "qsc_configs": qsc_configs if not args.skip_qsc else None,
         "noise_row": noise_row,
     }
     with open(output_dir / "metadata.json", "w", encoding="utf-8") as f:

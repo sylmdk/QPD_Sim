@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -17,6 +18,18 @@ DEFAULT_FIVEK_SAMPLES = [
 ]
 QPD_CFA_PATTERN = "RGGB"
 QPD_CFA_LAYOUT = "quad_bayer_2x2_blocks"
+QPD_SIMULATOR_TYPE = "hwk_full_field"
+QPD_SIMULATOR_VERSION = 1
+
+
+def sha256_file(path):
+    if path is None:
+        return None
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def list_fivek_dng_names():
@@ -83,13 +96,28 @@ def output_is_complete(output_dir, args):
         return False
     expected = {
         "crop": args.crop,
-        "qpd_readout_mode": args.qpd_readout_mode,
+        "qpd_readout_mode": "same",
         "qpd_cfa_pattern": QPD_CFA_PATTERN,
         "qpd_cfa_layout": QPD_CFA_LAYOUT,
+        "qpd_simulator_type": "disabled" if args.skip_qpd_sim else QPD_SIMULATOR_TYPE,
+        "qpd_simulator_version": QPD_SIMULATOR_VERSION,
     }
     if not all(metadata.get(key) == value for key, value in expected.items()):
         return False
-    return metadata.get("isp_params", {}).get("ccm_source_requested") == args.ccm_source
+    if metadata.get("isp_params", {}).get("ccm_source_requested") != args.ccm_source:
+        return False
+    if args.skip_qpd_sim:
+        return True
+    request = metadata.get("qpd_simulation_request", {})
+    expected_request = {
+        "hwk_dir": str(Path(args.hwk_dir).resolve()),
+        "hwk_config": None if args.hwk_config is None else str(Path(args.hwk_config).resolve()),
+        "hwk_config_sha256": sha256_file(args.hwk_config),
+        "distance": args.hwk_distance,
+        "aperture": args.hwk_aperture,
+        "cache_enabled": not args.no_hwk_cache,
+    }
+    return request == expected_request
 
 
 def run_single_image(pipeline_path, raw_path, output_root, args, index):
@@ -120,9 +148,18 @@ def run_single_image(pipeline_path, raw_path, output_root, args, index):
         cmd.extend(["--crop", args.crop])
     if args.ccm_source:
         cmd.extend(["--ccm-source", args.ccm_source])
-    cmd.extend(["--qpd-readout-mode", args.qpd_readout_mode])
-    if args.skip_qsc:
-        cmd.append("--skip-qsc")
+    if args.hwk_dir:
+        cmd.extend(["--hwk-dir", str(args.hwk_dir)])
+    if args.hwk_config:
+        cmd.extend(["--hwk-config", str(args.hwk_config)])
+    if args.hwk_distance:
+        cmd.extend(["--hwk-distance", args.hwk_distance])
+    if args.hwk_aperture:
+        cmd.extend(["--hwk-aperture", args.hwk_aperture])
+    if args.no_hwk_cache:
+        cmd.append("--no-hwk-cache")
+    if args.skip_qpd_sim:
+        cmd.append("--skip-qpd-sim")
     if args.skip_noise:
         cmd.append("--skip-noise")
 
@@ -171,17 +208,32 @@ def summarize_result(raw_path, output_dir, metadata, skipped=False):
         "qpd_readout_mode": metadata.get("qpd_readout_mode"),
         "qpd_cfa_pattern": metadata.get("qpd_cfa_pattern"),
         "qpd_cfa_layout": metadata.get("qpd_cfa_layout"),
+        "qpd_simulator_type": metadata.get("qpd_simulator_type"),
+        "hwk_condition": None
+        if metadata.get("qpd_simulation") is None
+        else {
+            "distance": metadata["qpd_simulation"].get("distance"),
+            "aperture": metadata["qpd_simulation"].get("aperture"),
+        },
+        "rdm_mix": None
+        if metadata.get("qpd_simulation") is None
+        else metadata["qpd_simulation"].get("rdm_mix"),
         "roundtrip_error": metadata.get("reversible_isp_roundtrip_error"),
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch process MIT-Adobe FiveK DNG files through QPD/QSC pipeline")
+    parser = argparse.ArgumentParser(description="Batch process MIT-Adobe FiveK DNG files through the HWK QPD pipeline")
     parser.add_argument("--raw-dir", default="data/raw_samples/fivek_batch", help="Directory containing FiveK DNG files")
     parser.add_argument("--output-root", default="outputs/fivek_batch", help="Root directory for per-image outputs")
     parser.add_argument("--pipeline", default="qpd_qsc_pipeline.py", help="Single-image pipeline script")
     parser.add_argument("--noise-table", default="noise_table.csv")
     parser.add_argument("--crop", default="3000x2000")
+    parser.add_argument("--hwk-dir", help="HWK field_data directory or statistics root")
+    parser.add_argument("--hwk-config", help="Optional HWK/RDM simulator config JSON")
+    parser.add_argument("--hwk-distance", help="Select one calibrated object distance")
+    parser.add_argument("--hwk-aperture", help="Select one calibrated aperture")
+    parser.add_argument("--no-hwk-cache", action="store_true", help="Disable adjacent .csv.npz HWK caches")
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--limit", type=int, help="Process at most N DNG files")
     parser.add_argument("--download-samples", action="store_true", help="Download two bundled FiveK test DNGs first")
@@ -196,10 +248,12 @@ def main():
         default="metadata",
         help="CCM source passed to qpd_qsc_pipeline.py; default matches the single-image pipeline.",
     )
-    parser.add_argument("--qpd-readout-mode", choices=("same", "subpixel"), default="same")
-    parser.add_argument("--skip-qsc", action="store_true")
+    parser.add_argument("--skip-qpd-sim", action="store_true", help="Skip HWK/RDM while retaining Quad RGGB sampling")
     parser.add_argument("--skip-noise", action="store_true")
     args = parser.parse_args()
+
+    if not args.download_only and not args.skip_qpd_sim and args.hwk_dir is None:
+        parser.error("--hwk-dir is required for processing unless --skip-qpd-sim is used")
 
     raw_dir = Path(args.raw_dir)
     output_root = Path(args.output_root)
@@ -258,6 +312,11 @@ def main():
         "raw_dir": str(raw_dir),
         "output_root": str(output_root),
         "crop": args.crop,
+        "hwk_dir": None if args.hwk_dir is None else str(Path(args.hwk_dir).resolve()),
+        "hwk_config": None if args.hwk_config is None else str(Path(args.hwk_config).resolve()),
+        "hwk_distance": args.hwk_distance,
+        "hwk_aperture": args.hwk_aperture,
+        "hwk_cache_enabled": not args.no_hwk_cache,
         "count": len(results),
         "success_count": sum(1 for result in results if not result.get("failed")),
         "failed_count": sum(1 for result in results if result.get("failed")),

@@ -1,4 +1,4 @@
-# QPD/QSC Raw Simulation Pipeline
+# QPD HWK Raw Simulation Pipeline
 
 This repository builds paired training data for:
 
@@ -6,15 +6,17 @@ This repository builds paired training data for:
 QPD raw -> clean energy field image
 ```
 
-The main target is joint demosaic / denoise training. The clean target is a linear camera RGB energy field, and the input is simulated 2x2 QPD raw with QSC perturbation, Poisson-Gaussian noise, and 10bit quantization.
+The main target is joint demosaic / denoise training. The clean target is a linear camera RGB energy field, and the input is simulated 2x2 QPD raw with measured full-field HWK response, residual domain randomization, Poisson-Gaussian noise, and 10bit quantization.
 
 ## Files
 
 ```text
 qpd_qsc_pipeline.py      Single-image RAW/DNG -> QPD dataset sample
+qpd_hwk_simulator.py    Full-field R/Gr/Gb/B HWK and residual-mix simulator
 batch_fivek_pipeline.py Batch download/process MIT-Adobe FiveK DNG files
 split_qpd_dataset.py    Create train/val/test manifests for QPD raw -> clean energy
-crosstalk_sim.py        QPD/QSC 2x2 perturbation simulator
+test_qpd_hwk_simulator.py Quad pattern, field crop, energy, and repeatability tests
+visualize_linear_srgb.py Render isp_linear_srgb.npy as an sRGB PNG
 noise_table.csv         10bit noise model table
 noise_table.xlsx        Original noise table
 ```
@@ -31,31 +33,51 @@ python -m pip install rawpy opencv-python numpy openpyxl exifread
 
 `openpyxl` is only needed when reading `noise_table.xlsx`. The default examples use `noise_table.csv`.
 
+Run the simulator tests with:
+
+```powershell
+python -m unittest -v test_qpd_hwk_simulator.py
+```
+
 ## Single Image
 
 Run one RAW/DNG image:
 
 ```powershell
-python qpd_qsc_pipeline.py --input path\to\image.dng --input-kind raw --output-dir outputs\sample --noise-table noise_table.csv
+python qpd_qsc_pipeline.py --input path\to\image.dng --input-kind raw --hwk-dir path\to\qpd_hwk_statistics_4c --output-dir outputs\sample --noise-table noise_table.csv
 ```
 
 Default settings:
 
 ```text
 crop: 3000x2000
-QPD CFA layout: fixed quad Bayer RGGB, 2x2 same-color blocks
+QPD CFA layout: fixed Quad Bayer RGGB, 2x2 same-color blocks
+QPD output size: same as clean target
 QPD raw output: 10bit, black=64, white=1023
 noise model: k-10bit / b-10bit from noise_table.csv
 ```
 
-Optional QPD readout modes:
+Expected HWK directory layout:
 
-```powershell
-python qpd_qsc_pipeline.py --input path\to\image.dng --input-kind raw --qpd-readout-mode same
-python qpd_qsc_pipeline.py --input path\to\image.dng --input-kind raw --qpd-readout-mode subpixel
+```text
+qpd_hwk_statistics_4c/
+  qpd_hwk_field_manifest.csv
+  field_data/
+    1.0m_F1.4_hwk_full_field.csv
+    ...
 ```
 
-`same` keeps the QPD raw size equal to the clean target. `subpixel` expands each clean pixel into a 2x2 QPD readout grid; QSC perturbation is applied on that expanded grid before CFA sampling.
+The selected full HWK field is center-cropped to the required QPD grid. For a `3000x2000` output, the CFA planes are `(1000,1500,4)` and the HWK field is `(500,750,4)`. The calibration field must be at least this large; HWK fields are not resized.
+
+Select a calibrated condition explicitly when needed:
+
+```powershell
+python qpd_qsc_pipeline.py --input path\to\image.dng --input-kind raw --hwk-dir path\to\qpd_hwk_statistics_4c --hwk-distance 1.0m --hwk-aperture F1.4 --output-dir outputs\sample
+```
+
+Use `--hwk-config path\to\hwk_config.json` to override jitter and residual-mix settings. `--skip-qpd-sim` is a debug mode that retains Quad RGGB sampling but bypasses HWK/RDM.
+
+The first CSV load writes an adjacent `.csv.npz` binary cache. Later batch subprocesses load this cache instead of reparsing the full CSV. Use `--no-hwk-cache` when the calibration directory must remain read-only.
 
 The simulated QPD raw always uses quad Bayer RGGB layout. The input camera CFA is only used when reading and demosaicing the source RAW into `clean_energy_field`.
 
@@ -71,12 +93,20 @@ qpd_raw_preview.png      Preview of qpd_raw.
 metadata.json            Parameters, levels, ISO/noise row, CCM info, roundtrip error.
 ```
 
+Render the stored linear-sRGB tensor as an 8bit sRGB PNG:
+
+```powershell
+python visualize_linear_srgb.py --input-npy outputs\sample\isp_linear_srgb.npy --metadata-json outputs\sample\metadata.json
+```
+
+The script validates the NPY shape against the supplied metadata, applies only the sRGB transfer function, and writes `reconstructed_srgb.png` beside the metadata. AWB and CCM are not applied again because they are already included in `isp_linear_srgb.npy`. Use `--bit-depth 16` for a 16bit PNG or `--output path\to\preview.png` to choose the output path.
+
 ## FiveK Batch Processing
 
 Download and process the full MIT-Adobe FiveK DNG set:
 
 ```powershell
-python batch_fivek_pipeline.py --download-all --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --noise-table noise_table.csv
+python batch_fivek_pipeline.py --download-all --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --hwk-dir path\to\qpd_hwk_statistics_4c --noise-table noise_table.csv
 ```
 
 Only download DNG files, without processing:
@@ -88,13 +118,13 @@ python batch_fivek_pipeline.py --download-all --download-only --raw-dir data\raw
 Test the first 10 files:
 
 ```powershell
-python batch_fivek_pipeline.py --download-all --limit 10 --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --noise-table noise_table.csv
+python batch_fivek_pipeline.py --download-all --limit 10 --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --hwk-dir path\to\qpd_hwk_statistics_4c --noise-table noise_table.csv
 ```
 
 Resume processing an existing DNG directory:
 
 ```powershell
-python batch_fivek_pipeline.py --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --noise-table noise_table.csv
+python batch_fivek_pipeline.py --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --hwk-dir path\to\qpd_hwk_statistics_4c --noise-table noise_table.csv
 ```
 
 By default, existing completed samples are skipped. A completed sample has:
@@ -105,20 +135,20 @@ qpd_raw.npy
 clean_energy_field.npy
 ```
 
-Its metadata must also match the requested crop/readout settings and the fixed quad Bayer RGGB layout; older outputs with a different QPD CFA contract are reprocessed.
+Its metadata must also match the crop, fixed Quad RGGB layout, HWK simulator version, HWK path/config hash, and requested distance/aperture. Legacy QSC outputs are reprocessed.
 
 Force reprocessing:
 
 ```powershell
-python batch_fivek_pipeline.py --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --noise-table noise_table.csv --no-skip-existing
+python batch_fivek_pipeline.py --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --hwk-dir path\to\qpd_hwk_statistics_4c --noise-table noise_table.csv --no-skip-existing
 ```
 
 Some FiveK files are not standard 2x2 Bayer CFA. These are recorded as failures and skipped, unless `--fail-fast` is set.
 
-Batch processing also accepts the single-image QPD mode options:
+Batch processing accepts the same HWK condition/config options:
 
 ```powershell
-python batch_fivek_pipeline.py --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --qpd-readout-mode subpixel
+python batch_fivek_pipeline.py --raw-dir data\raw_samples\fivek_full --output-root outputs\fivek_full --hwk-dir path\to\qpd_hwk_statistics_4c --hwk-distance 1.0m --hwk-aperture F1.4 --hwk-config path\to\hwk_config.json
 ```
 
 ## Dataset Split
@@ -145,7 +175,7 @@ Each row maps:
 input_qpd_raw -> target_clean_energy
 ```
 
-The manifests include both `qpd_shape` and `target_shape`, so size-changing modes such as `--qpd-readout-mode subpixel` are explicit.
+The manifests include `qpd_shape`, `target_shape`, simulator type, and selected HWK condition. Only current HWK-simulator outputs are included.
 
 By default, only manifests are written. To materialize files into split folders:
 
