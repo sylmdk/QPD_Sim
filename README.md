@@ -137,6 +137,8 @@ clean_energy_field.npy
 
 Its metadata must also match the crop, fixed Quad RGGB layout, HWK simulator version, HWK path/config hash, and requested distance/aperture. Legacy QSC outputs are reprocessed.
 
+Before launching the single-image pipeline, the batch script checks the visible RAW dimensions against `--crop` (default `3000x2000`). An undersized image is marked as `skipped_small_image`, does not get a per-sample output directory, and is recorded only in `batch_summary.json` with its source and requested dimensions. `skipped_small_image_count` reports the total separately from successful and failed samples.
+
 Force reprocessing:
 
 ```powershell
@@ -158,6 +160,14 @@ Create train/val/test manifests:
 ```powershell
 python split_qpd_dataset.py --source-root outputs\fivek_full --output-root dataset\qpd_fivek --train 0.8 --val 0.1 --test 0.1 --seed 2026
 ```
+
+By default, all valid samples participate in the split. Use `--num-samples` to select a reproducible random subset before applying the train/val/test ratios:
+
+```powershell
+python split_qpd_dataset.py --source-root outputs\fivek_full --output-root dataset\qpd_fivek_1000 --num-samples 1000 --seed 2026
+```
+
+The requested count must be a positive integer no larger than the number of valid samples. `split_summary.json` records both `total_valid_samples` and `participating_samples`.
 
 This writes:
 

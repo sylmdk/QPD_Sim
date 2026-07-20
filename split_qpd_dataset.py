@@ -84,10 +84,19 @@ def split_counts(total, train_ratio, val_ratio):
     return counts[0], counts[1], counts[2]
 
 
-def split_samples(samples, train_ratio, val_ratio, seed):
+def split_samples(samples, train_ratio, val_ratio, seed, num_samples=None):
     shuffled = list(samples)
     rng = random.Random(seed)
     rng.shuffle(shuffled)
+    if num_samples is not None:
+        if num_samples <= 0:
+            raise ValueError("num_samples must be a positive integer")
+        if num_samples > len(shuffled):
+            raise ValueError(
+                f"num_samples ({num_samples}) exceeds the number of valid samples ({len(shuffled)})"
+            )
+        shuffled = shuffled[:num_samples]
+
     train_count, val_count, _ = split_counts(len(shuffled), train_ratio, val_ratio)
     return {
         "train": shuffled[:train_count],
@@ -204,6 +213,12 @@ def main():
     parser.add_argument("--test", type=float, default=0.1, help="Test ratio; checked against train/val")
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=None,
+        help="Number of valid samples to include; default uses all valid samples",
+    )
+    parser.add_argument(
         "--materialize",
         choices=("none", "copy", "hardlink"),
         default="none",
@@ -221,7 +236,8 @@ def main():
     if not samples:
         raise FileNotFoundError(f"No valid samples found in {source_root}")
 
-    splits = split_samples(samples, args.train, args.val, args.seed)
+    splits = split_samples(samples, args.train, args.val, args.seed, args.num_samples)
+    participating_count = sum(len(split_samples_list) for split_samples_list in splits.values())
     output_root.mkdir(parents=True, exist_ok=True)
 
     if args.materialize != "none":
@@ -249,6 +265,8 @@ def main():
             "source_root": str(source_root),
             "output_root": str(output_root),
             "total_valid_samples": len(samples),
+            "requested_num_samples": args.num_samples,
+            "participating_samples": participating_count,
             "ratios": {"train": args.train, "val": args.val, "test": args.test},
             "seed": args.seed,
             "materialize": args.materialize,
@@ -257,6 +275,7 @@ def main():
     )
 
     print(f"valid samples: {len(samples)}")
+    print(f"participating samples: {participating_count}")
     for split_name in ("train", "val", "test"):
         print(f"{split_name}: {len(splits[split_name])}")
     print(f"saved manifests to: {output_root}")

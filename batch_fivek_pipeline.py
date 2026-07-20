@@ -32,6 +32,35 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def parse_crop_size(crop):
+    if crop is None:
+        return None
+    match = re.fullmatch(r"\s*(\d+)\s*[xX*]\s*(\d+)\s*", crop)
+    if match is None:
+        raise ValueError(f"Invalid crop size {crop!r}; expected WIDTHxHEIGHT, for example 3000x2000")
+    width, height = (int(value) for value in match.groups())
+    if width <= 0 or height <= 0:
+        raise ValueError("Crop width and height must be positive")
+    return width, height
+
+
+def read_raw_visible_size(raw_path):
+    try:
+        import rawpy
+    except ImportError as exc:
+        raise RuntimeError("rawpy is required to inspect RAW image dimensions") from exc
+
+    with rawpy.imread(str(raw_path)) as raw:
+        height, width = raw.raw_image_visible.shape
+    return int(width), int(height)
+
+
+def is_smaller_than_crop(source_size, crop_size):
+    source_width, source_height = source_size
+    crop_width, crop_height = crop_size
+    return source_width < crop_width or source_height < crop_height
+
+
 def list_fivek_dng_names():
     html = urllib.request.urlopen(FIVEK_DATASET_URL, timeout=120).read().decode("utf-8", "ignore")
     names = re.findall(r'href="img/dng/([^"]+\.dng)"', html)
@@ -123,6 +152,25 @@ def output_is_complete(output_dir, args):
 def run_single_image(pipeline_path, raw_path, output_root, args, index):
     stem = raw_path.stem
     output_dir = output_root / stem
+    source_size = read_raw_visible_size(raw_path)
+    if args.crop_size is not None and is_smaller_than_crop(source_size, args.crop_size):
+        source_width, source_height = source_size
+        crop_width, crop_height = args.crop_size
+        print(
+            f"skip small image: {raw_path} "
+            f"({source_width}x{source_height} < required {crop_width}x{crop_height})"
+        )
+        return {
+            "input": str(raw_path),
+            "output_dir": str(output_dir),
+            "failed": False,
+            "skipped_existing": False,
+            "skipped_small_image": True,
+            "source_size": [source_width, source_height],
+            "requested_crop": [crop_width, crop_height],
+            "reason": "source image is smaller than the requested crop",
+        }
+
     if args.skip_existing and output_is_complete(output_dir, args):
         print(f"skip existing output: {output_dir}")
         with open(output_dir / "metadata.json", "r", encoding="utf-8") as f:
@@ -252,6 +300,11 @@ def main():
     parser.add_argument("--skip-noise", action="store_true")
     args = parser.parse_args()
 
+    try:
+        args.crop_size = parse_crop_size(args.crop)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     if not args.download_only and not args.skip_qpd_sim and args.hwk_dir is None:
         parser.error("--hwk-dir is required for processing unless --skip-qpd-sim is used")
 
@@ -318,9 +371,14 @@ def main():
         "hwk_aperture": args.hwk_aperture,
         "hwk_cache_enabled": not args.no_hwk_cache,
         "count": len(results),
-        "success_count": sum(1 for result in results if not result.get("failed")),
+        "success_count": sum(
+            1
+            for result in results
+            if not result.get("failed") and not result.get("skipped_small_image")
+        ),
         "failed_count": sum(1 for result in results if result.get("failed")),
         "skipped_existing_count": sum(1 for result in results if result.get("skipped_existing")),
+        "skipped_small_image_count": sum(1 for result in results if result.get("skipped_small_image")),
         "downloads": download_records,
         "results": results,
     }
