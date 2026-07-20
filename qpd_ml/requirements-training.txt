@@ -1,0 +1,9 @@
+torch>=2.1,<3
+lightning>=2.4,<3
+numpy>=1.26
+PyYAML>=6.0
+tensorboard>=2.16
+torchmetrics>=1.4,<2
+lpips>=0.1.4
+torchvision>=0.16,<1
+Pillow>=10

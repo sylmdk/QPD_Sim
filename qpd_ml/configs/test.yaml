@@ -1,0 +1,35 @@
+experiment:
+  name: qpd_test
+  version: null
+  output_dir: outputs/qpd_training
+  seed: 2026
+
+data:
+  data_dir: data/datasets/qpd_dev10
+  data_split: test
+
+metrics:
+  domain: srgb
+  data_range: 1.0
+  lpips:
+    enabled: true
+    net_type: alex
+
+trainer:
+  accelerator: auto             # auto | gpu | cpu
+  devices: 1                    # e.g. [0, 2]; samples are distributed across these GPUs
+  strategy: auto
+  precision: 32-true
+  deterministic: true
+  enable_progress_bar: false
+
+test:
+  checkpoint: null
+  run_metrics: true
+
+inference:
+  enabled: true
+  sample_ids: []
+  output_dir: outputs/qpd_reconstruction
+  save_clean_energy_field: true
+  save_srgb_png: true

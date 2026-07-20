@@ -1,0 +1,77 @@
+experiment:
+  name: qpd_unet
+  version: null
+  output_dir: outputs/qpd_training
+  seed: 2026
+
+data:
+  data_dir: data/datasets/qpd_dev10
+  data_split: train
+  patch_size: 256
+  batch_size: 2
+  train_patches_per_image: 8
+  eval_patches_per_image: 4
+  num_workers: 0
+  augment_rotate_180: true
+
+model:
+  in_channels: 4
+  out_channels: 3
+  base_channels: 32
+  channel_multipliers: [1, 2, 4, 8]
+  blocks_per_stage: 2
+  normalization: group
+  norm_groups: 8
+  activation: silu
+  dropout: 0.0
+  residual_blocks: true
+  upsample_mode: bilinear
+  output_activation: sigmoid
+
+optimizer:
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  scheduler: cosine
+  min_learning_rate: 0.000001
+
+loss:
+  l1_weight: 1.0
+  mse_weight: 0.0
+
+metrics:
+  domain: srgb
+  data_range: 1.0
+  lpips:
+    enabled: true
+    net_type: alex
+
+visualization:
+  enabled: true
+  domain: srgb
+  every_n_epochs: 1
+  max_images: 4
+
+checkpoint:
+  monitor: val_psnr
+  mode: max
+  filename: qpd-{epoch:03d}-{val_psnr:.2f}-{val_ssim:.4f}
+  save_last: true
+  save_top_k: 1
+
+resume:
+  enabled: false
+  # Use "auto" to find the newest <output_dir>/<name>/*/checkpoints/last.ckpt,
+  # or provide an explicit .ckpt path.
+  checkpoint: auto
+
+trainer:
+  max_epochs: 50
+  accelerator: auto             # auto | gpu | cpu
+  devices: 1                    # e.g. [0, 1] selects exact GPUs
+  strategy: auto                # auto selects DDP when multiple GPUs are requested
+  precision: 32-true
+  deterministic: true
+  log_every_n_steps: 1
+  enable_progress_bar: false
+  fast_dev_run: false
