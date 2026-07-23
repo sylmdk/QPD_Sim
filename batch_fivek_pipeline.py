@@ -51,7 +51,10 @@ def read_raw_visible_size(raw_path):
         raise RuntimeError("rawpy is required to inspect RAW image dimensions") from exc
 
     with rawpy.imread(str(raw_path)) as raw:
-        height, width = raw.raw_image_visible.shape
+        visible_shape = raw.raw_image_visible.shape
+        if len(visible_shape) < 2:
+            raise ValueError(f"Unexpected RAW visible shape for {raw_path}: {visible_shape}")
+        height, width = visible_shape[:2]
     return int(width), int(height)
 
 

@@ -75,6 +75,10 @@ def load_srgb_image(path):
 
 
 def cfa_pattern_from_rawpy(raw):
+    if raw.raw_pattern is None:
+        raise ValueError(
+            "Only standard 2x2 Bayer CFA RAW is supported; rawpy returned raw_pattern=None."
+        )
     if raw.raw_pattern.shape != (2, 2):
         raise ValueError(f"Unsupported RAW pattern shape {raw.raw_pattern.shape}; expected a standard 2x2 Bayer CFA.")
     color_desc = raw.color_desc.decode("ascii")
