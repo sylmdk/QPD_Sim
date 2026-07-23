@@ -115,7 +115,11 @@ def download_samples(raw_dir, sample_names):
 
 
 def output_is_complete(output_dir, args):
-    required = ("metadata.json", "qpd_raw.npy", "clean_energy_field.npy")
+    required = ["metadata.json", "qpd_raw.npy", "clean_energy_field.npy"]
+    if args.save_isp_linear:
+        required.append("isp_linear_srgb.npy")
+    if args.save_previews:
+        required.extend(("isp_srgb.png", "clean_energy_preview.png", "qpd_raw_preview.png"))
     if not all((output_dir / name).exists() for name in required):
         return False
     try:
@@ -125,6 +129,9 @@ def output_is_complete(output_dir, args):
         return False
     expected = {
         "crop": args.crop,
+        "clean_energy_dtype": args.clean_dtype,
+        "isp_linear_srgb_saved": args.save_isp_linear,
+        "previews_saved": args.save_previews,
         "qpd_readout_mode": "same",
         "qpd_cfa_pattern": QPD_CFA_PATTERN,
         "qpd_cfa_layout": QPD_CFA_LAYOUT,
@@ -190,6 +197,8 @@ def run_single_image(pipeline_path, raw_path, output_root, args, index):
         str(args.noise_table),
         "--seed",
         str(args.seed + index),
+        "--clean-dtype",
+        args.clean_dtype,
     ]
 
     if args.crop:
@@ -210,6 +219,10 @@ def run_single_image(pipeline_path, raw_path, output_root, args, index):
         cmd.append("--skip-qpd-sim")
     if args.skip_noise:
         cmd.append("--skip-noise")
+    if args.save_isp_linear:
+        cmd.append("--save-isp-linear")
+    if not args.save_previews:
+        cmd.append("--skip-previews")
 
     print(f"processing: {raw_path}")
     try:
@@ -245,6 +258,9 @@ def summarize_result(raw_path, output_dir, metadata, skipped=False):
         "output_dir": str(output_dir),
         "skipped_existing": skipped,
         "shape": metadata.get("shape"),
+        "clean_energy_dtype": metadata.get("clean_energy_dtype"),
+        "isp_linear_srgb_saved": metadata.get("isp_linear_srgb_saved"),
+        "previews_saved": metadata.get("previews_saved"),
         "qpd_output_levels": metadata.get("qpd_output_levels"),
         "iso": metadata.get("isp_params", {}).get("iso"),
         "iso_source": metadata.get("isp_params", {}).get("iso_source"),
@@ -277,6 +293,22 @@ def main():
     parser.add_argument("--pipeline", default="qpd_qsc_pipeline.py", help="Single-image pipeline script")
     parser.add_argument("--noise-table", default="noise_table.csv")
     parser.add_argument("--crop", default="3000x2000")
+    parser.add_argument(
+        "--clean-dtype",
+        choices=("float16", "float32"),
+        default="float16",
+        help="Storage dtype for clean targets; float16 roughly halves their disk usage",
+    )
+    parser.add_argument(
+        "--save-isp-linear",
+        action="store_true",
+        help="Save the optional float32 ISP intermediate for every sample",
+    )
+    parser.add_argument(
+        "--save-previews",
+        action="store_true",
+        help="Save three preview PNG files per sample; disabled by default for batch storage",
+    )
     parser.add_argument("--hwk-dir", help="HWK field_data directory or statistics root")
     parser.add_argument("--hwk-config", help="Optional HWK/RDM simulator config JSON")
     parser.add_argument("--hwk-distance", help="Select one calibrated object distance")
@@ -341,6 +373,9 @@ def main():
             "raw_dir": str(raw_dir),
             "output_root": str(output_root),
             "crop": args.crop,
+            "clean_energy_dtype": args.clean_dtype,
+            "save_isp_linear": args.save_isp_linear,
+            "save_previews": args.save_previews,
             "count": 0,
             "downloads": download_records,
             "results": [],
@@ -365,6 +400,9 @@ def main():
         "raw_dir": str(raw_dir),
         "output_root": str(output_root),
         "crop": args.crop,
+        "clean_energy_dtype": args.clean_dtype,
+        "save_isp_linear": args.save_isp_linear,
+        "save_previews": args.save_previews,
         "hwk_dir": None if args.hwk_dir is None else str(Path(args.hwk_dir).resolve()),
         "hwk_config": None if args.hwk_config is None else str(Path(args.hwk_config).resolve()),
         "hwk_distance": args.hwk_distance,

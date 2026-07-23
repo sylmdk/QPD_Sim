@@ -557,6 +557,22 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--crop", default="3000x2000", help="4-pixel-aligned center crop before ISP/QPD simulation, default 3000x2000")
     parser.add_argument(
+        "--clean-dtype",
+        choices=("float16", "float32"),
+        default="float16",
+        help="Storage dtype for clean_energy_field.npy; processing remains float32",
+    )
+    parser.add_argument(
+        "--save-isp-linear",
+        action="store_true",
+        help="Save the optional float32 isp_linear_srgb.npy debugging tensor",
+    )
+    parser.add_argument(
+        "--skip-previews",
+        action="store_true",
+        help="Do not write ISP, clean-energy, or QPD preview PNG files",
+    )
+    parser.add_argument(
         "--ccm-source",
         choices=("auto", "rawpy-fit", "metadata", "identity"),
         default="metadata",
@@ -717,21 +733,41 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    np.save(output_dir / "clean_energy_field.npy", clean_energy_field.astype(np.float32))
-    np.save(output_dir / "isp_linear_srgb.npy", linear_srgb.astype(np.float32))
+    clean_storage_dtype = np.float16 if args.clean_dtype == "float16" else np.float32
+    clean_storage = clean_energy_field.astype(clean_storage_dtype)
+    np.save(output_dir / "clean_energy_field.npy", clean_storage)
     np.save(output_dir / "qpd_raw.npy", raw_quantized)
-    save_srgb_image(srgb, output_dir / "isp_srgb.png")
-    save_linear_rgb_preview(clean_energy_field, output_dir / "clean_energy_preview.png")
-    save_preview(raw_quantized, output_black_level, output_white_level, output_dir / "qpd_raw_preview.png")
+
+    isp_linear_path = output_dir / "isp_linear_srgb.npy"
+    if args.save_isp_linear:
+        np.save(isp_linear_path, linear_srgb.astype(np.float32))
+    else:
+        isp_linear_path.unlink(missing_ok=True)
+
+    preview_paths = (
+        output_dir / "isp_srgb.png",
+        output_dir / "clean_energy_preview.png",
+        output_dir / "qpd_raw_preview.png",
+    )
+    if args.skip_previews:
+        for preview_path in preview_paths:
+            preview_path.unlink(missing_ok=True)
+    else:
+        save_srgb_image(srgb, preview_paths[0])
+        save_linear_rgb_preview(clean_energy_field, preview_paths[1])
+        save_preview(raw_quantized, output_black_level, output_white_level, preview_paths[2])
 
     metadata = {
         "input": str(args.input),
         "input_kind": input_kind,
         "crop": args.crop,
         "isp_srgb_source": "linear_to_srgb(clip(isp_linear_srgb)) reversible ISP preview",
-        "isp_srgb": str(output_dir / "isp_srgb.png"),
+        "isp_srgb": None if args.skip_previews else str(preview_paths[0]),
         "clean_energy_field": str(output_dir / "clean_energy_field.npy"),
-        "isp_linear_srgb": str(output_dir / "isp_linear_srgb.npy"),
+        "clean_energy_dtype": str(clean_storage.dtype),
+        "isp_linear_srgb": str(isp_linear_path) if args.save_isp_linear else None,
+        "isp_linear_srgb_saved": bool(args.save_isp_linear),
+        "previews_saved": not args.skip_previews,
         "clean_energy_domain": "linear camera RGB after black-level subtraction, white-level normalization, and demosaic",
         "reversible_isp_contract": "clean_energy_field -> AWB -> CCM -> isp_linear_srgb; inverse uses inverse(CCM) and inverse AWB on float tensors before gamma/clip/quantization",
         "reversible_isp_roundtrip_error": roundtrip_error,
@@ -776,7 +812,8 @@ def main():
         json.dump(metadata, f, indent=2)
 
     print(f"saved {output_dir / 'qpd_raw.npy'}")
-    print(f"saved {output_dir / 'qpd_raw_preview.png'}")
+    if not args.skip_previews:
+        print(f"saved {output_dir / 'qpd_raw_preview.png'}")
     print(f"saved {output_dir / 'metadata.json'}")
 
 

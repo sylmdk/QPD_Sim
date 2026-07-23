@@ -15,7 +15,6 @@ qpd_qsc_pipeline.py      Single-image RAW/DNG -> QPD dataset sample
 qpd_hwk_simulator.py    Full-field R/Gr/Gb/B HWK and residual-mix simulator
 batch_fivek_pipeline.py Batch download/process MIT-Adobe FiveK DNG files
 split_qpd_dataset.py    Create train/val/test manifests for QPD raw -> clean energy
-test_qpd_hwk_simulator.py Quad pattern, field crop, energy, and repeatability tests
 visualize_linear_srgb.py Render isp_linear_srgb.npy as an sRGB PNG
 noise_table.csv         10bit noise model table
 noise_table.xlsx        Original noise table
@@ -32,12 +31,6 @@ python -m pip install rawpy opencv-python numpy openpyxl exifread
 ```
 
 `openpyxl` is only needed when reading `noise_table.xlsx`. The default examples use `noise_table.csv`.
-
-Run the simulator tests with:
-
-```powershell
-python -m unittest -v test_qpd_hwk_simulator.py
-```
 
 ## Single Image
 
@@ -86,16 +79,19 @@ Per-sample outputs:
 ```text
 clean_energy_field.npy   Target. Linear camera RGB after black/white normalization and demosaic.
 qpd_raw.npy              Input. Simulated QPD raw, uint16, 10bit levels.
-isp_linear_srgb.npy      Reversible linear ISP intermediate.
+isp_linear_srgb.npy      Optional reversible linear ISP intermediate (`--save-isp-linear`).
 isp_srgb.png             Preview of the reversible ISP result.
 clean_energy_preview.png Preview of the clean energy field.
 qpd_raw_preview.png      Preview of qpd_raw.
 metadata.json            Parameters, levels, ISO/noise row, CCM info, roundtrip error.
 ```
 
+`clean_energy_field.npy` is stored as `float16` by default while all ISP and simulation calculations remain `float32`. Use `--clean-dtype float32` when full float32 target storage is required. The optional `isp_linear_srgb.npy` is only written with `--save-isp-linear`.
+
 Render the stored linear-sRGB tensor as an 8bit sRGB PNG:
 
 ```powershell
+python qpd_qsc_pipeline.py --input path\to\image.dng --input-kind raw --hwk-dir path\to\qpd_hwk_statistics_4c --output-dir outputs\sample --save-isp-linear
 python visualize_linear_srgb.py --input-npy outputs\sample\isp_linear_srgb.npy --metadata-json outputs\sample\metadata.json
 ```
 
@@ -136,6 +132,8 @@ clean_energy_field.npy
 ```
 
 Its metadata must also match the crop, fixed Quad RGGB layout, HWK simulator version, HWK path/config hash, and requested distance/aperture. Legacy QSC outputs are reprocessed.
+
+Batch mode defaults to compact training outputs: `clean_energy_field.npy` uses `float16`, `isp_linear_srgb.npy` is omitted, and preview PNGs are omitted. Add `--clean-dtype float32`, `--save-isp-linear`, or `--save-previews` only when those debugging artifacts are needed.
 
 Before launching the single-image pipeline, the batch script checks the visible RAW dimensions against `--crop` (default `3000x2000`). An undersized image is marked as `skipped_small_image`, does not get a per-sample output directory, and is recorded only in `batch_summary.json` with its source and requested dimensions. `skipped_small_image_count` reports the total separately from successful and failed samples.
 
@@ -185,7 +183,7 @@ Each row maps:
 input_qpd_raw -> target_clean_energy
 ```
 
-The manifests include `qpd_shape`, `target_shape`, simulator type, and selected HWK condition. Only current HWK-simulator outputs are included.
+The manifests include `qpd_shape`, `target_shape`, `target_dtype`, simulator type, and selected HWK condition. Only current HWK-simulator outputs are included.
 
 By default, only manifests are written. To materialize files into split folders:
 
@@ -249,14 +247,12 @@ The chosen noise row is recorded in `metadata.json`.
 
 ## Storage Warning
 
-The full FiveK DNG archive is about 50GB. The generated outputs are much larger because each sample stores:
+The full FiveK DNG archive is about 50GB. Default batch output for a `3000x2000` sample stores approximately 45.8 MiB:
 
 ```text
-clean_energy_field.npy
-isp_linear_srgb.npy
-qpd_raw.npy
-preview PNGs
-metadata
+clean_energy_field.npy  float16, about 34.3 MiB
+qpd_raw.npy             uint16, about 11.4 MiB
+metadata.json           a few KiB
 ```
 
-Plan for hundreds of GB if processing the full dataset.
+Optional `isp_linear_srgb.npy` adds about 68.7 MiB, and the three preview PNGs commonly add tens of MiB. Even compact output can exceed 200GB for all 5000 images, so check available storage before a full run.
