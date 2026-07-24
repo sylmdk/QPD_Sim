@@ -65,11 +65,6 @@ def calculate_full_image_metrics(
     device = next(model.parameters()).device
     pred = _camera_tensor(prediction, device)
     truth = _camera_tensor(target, device)
-    l1 = F.l1_loss(pred, truth)
-    mse = F.mse_loss(pred, truth)
-    loss = float(model.loss_config.get("l1_weight", 1.0)) * l1
-    if model.loss_config.get("mse_weight", 0.0):
-        loss = loss + float(model.loss_config["mse_weight"]) * mse
 
     domain = model.metrics_config.get("domain", "srgb")
     if domain == "srgb":
@@ -88,8 +83,6 @@ def calculate_full_image_metrics(
         data_range=float(model.metrics_config.get("data_range", 1.0))
     ).to(device)(metric_pred, metric_target)
     result = {
-        "test_loss": float(loss),
-        "test_l1": float(l1),
         "test_psnr": float(psnr),
         "test_ssim": float(ssim),
     }

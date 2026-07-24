@@ -85,24 +85,28 @@ def split_counts(total, train_ratio, val_ratio):
     return counts[0], counts[1], counts[2]
 
 
-def split_samples(samples, train_ratio, val_ratio, seed, num_samples=None):
-    shuffled = list(samples)
-    rng = random.Random(seed)
-    rng.shuffle(shuffled)
+def split_samples(samples, train_ratio, val_ratio, seed, num_samples=None, split_order="random"):
+    selected = list(samples)
+    if split_order == "random":
+        rng = random.Random(seed)
+        rng.shuffle(selected)
+    elif split_order != "sequential":
+        raise ValueError(f"Unsupported split_order: {split_order}")
+
     if num_samples is not None:
         if num_samples <= 0:
             raise ValueError("num_samples must be a positive integer")
-        if num_samples > len(shuffled):
+        if num_samples > len(selected):
             raise ValueError(
-                f"num_samples ({num_samples}) exceeds the number of valid samples ({len(shuffled)})"
+                f"num_samples ({num_samples}) exceeds the number of valid samples ({len(selected)})"
             )
-        shuffled = shuffled[:num_samples]
+        selected = selected[:num_samples]
 
-    train_count, val_count, _ = split_counts(len(shuffled), train_ratio, val_ratio)
+    train_count, val_count, _ = split_counts(len(selected), train_ratio, val_ratio)
     return {
-        "train": shuffled[:train_count],
-        "val": shuffled[train_count:train_count + val_count],
-        "test": shuffled[train_count + val_count:],
+        "train": selected[:train_count],
+        "val": selected[train_count:train_count + val_count],
+        "test": selected[train_count + val_count:],
     }
 
 
@@ -222,6 +226,12 @@ def main():
         help="Number of valid samples to include; default uses all valid samples",
     )
     parser.add_argument(
+        "--split-order",
+        choices=("random", "sequential"),
+        default="random",
+        help="random shuffles with --seed; sequential preserves sorted sample-directory order",
+    )
+    parser.add_argument(
         "--materialize",
         choices=("none", "copy", "hardlink"),
         default="none",
@@ -239,7 +249,14 @@ def main():
     if not samples:
         raise FileNotFoundError(f"No valid samples found in {source_root}")
 
-    splits = split_samples(samples, args.train, args.val, args.seed, args.num_samples)
+    splits = split_samples(
+        samples,
+        args.train,
+        args.val,
+        args.seed,
+        args.num_samples,
+        args.split_order,
+    )
     participating_count = sum(len(split_samples_list) for split_samples_list in splits.values())
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -270,6 +287,7 @@ def main():
             "total_valid_samples": len(samples),
             "requested_num_samples": args.num_samples,
             "participating_samples": participating_count,
+            "split_order": args.split_order,
             "ratios": {"train": args.train, "val": args.val, "test": args.test},
             "seed": args.seed,
             "materialize": args.materialize,
@@ -279,6 +297,7 @@ def main():
 
     print(f"valid samples: {len(samples)}")
     print(f"participating samples: {participating_count}")
+    print(f"split order: {args.split_order}")
     for split_name in ("train", "val", "test"):
         print(f"{split_name}: {len(splits[split_name])}")
     print(f"saved manifests to: {output_root}")

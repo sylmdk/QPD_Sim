@@ -107,8 +107,6 @@ python -m qpd_ml.test --config qpd_ml/configs/test.yaml --checkpoint outputs/qpd
 
 `test.run_metrics: true` 时，通过 `data.data_split` 对应的 CSV 加载目标数据并输出：
 
-- `test_loss`
-- `test_l1`
 - `test_psnr`
 - `test_ssim`
 - `test_lpips`

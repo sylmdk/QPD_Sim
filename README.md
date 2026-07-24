@@ -167,6 +167,14 @@ python split_qpd_dataset.py --source-root outputs\fivek_full --output-root datas
 
 The requested count must be a positive integer no larger than the number of valid samples. `split_summary.json` records both `total_valid_samples` and `participating_samples`.
 
+To preserve sorted sample-directory order, select the first `N` valid samples and split them into contiguous train/val/test ranges:
+
+```powershell
+python split_qpd_dataset.py --source-root outputs\fivek_full --output-root dataset\qpd_fivek_seq400 --num-samples 400 --split-order sequential --train 0.8 --val 0.1 --test 0.1
+```
+
+With this example, the first 320 sorted samples become train, the next 40 become val, and the final 40 become test. `--seed` only affects the default `random` mode. The selected mode is recorded as `split_order` in `split_summary.json`.
+
 This writes:
 
 ```text
